@@ -1,0 +1,32 @@
+# 1. Мусор сборки и временные файлы
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+
+# 2. Настройки редакторов (Личное)
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+Thumbs.db
+
+# 3. Android (Игнорируем тяжелый мусор, оставляем настройки)
+android/.gradle
+android/captures/
+android/local.properties
+# Файл ниже создается сам, его не храним
+GeneratedPluginRegistrant.java
+
+# 4. Ключи (Безопасность)
+key.properties
+**/*.keystore
+**/*.jks
+
+linux/
+macos/
+web/
+windows/
