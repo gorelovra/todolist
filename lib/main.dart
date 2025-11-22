@@ -120,7 +120,7 @@ class _RomanHomePageState extends State<RomanHomePage>
   @override
   void initState() {
     super.initState();
-    // Теперь порядок: Мусорка (0), Список (1), Ачивки (2)
+    // Порядок: Мусорка (0), Список (1), Ачивки (2)
     _tabController = TabController(length: 3, vsync: this, initialIndex: 1);
     _box = Hive.box<Task>('tasksBox');
 
@@ -140,9 +140,138 @@ class _RomanHomePageState extends State<RomanHomePage>
     super.dispose();
   }
 
+  // --- ЛОГИКА КОПИРОВАНИЯ ---
+
+  String _getTaskEmoji(Task t) {
+    if (t.isDeleted) return "❌";
+    if (t.isCompleted) return "✅";
+
+    // Активные задачи
+    if (t.urgency == 2 && t.importance == 2) return "⚡⭐️"; // Император
+    if (t.urgency == 2) return "⚡"; // Легионер (Срочно)
+    if (t.importance == 2) return "⭐️"; // Сенатор (Важно)
+    return "▫️"; // Гражданин
+  }
+
+  String _formatListForClipboard(List<Task> tasks, String headerTitle) {
+    if (tasks.isEmpty) return "";
+    StringBuffer buffer = StringBuffer();
+    buffer.writeln("\n🏛 **$headerTitle**");
+
+    // Сортировка по индексу
+    tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+
+    for (int i = 0; i < tasks.length; i++) {
+      final t = tasks[i];
+      final emoji = _getTaskEmoji(t);
+      // Для удаленных и завершенных просто иконка, для активных - нумерация
+      if (t.isDeleted || t.isCompleted) {
+        buffer.writeln("$emoji ${t.title}");
+      } else {
+        buffer.writeln("${i + 1}. $emoji ${t.title}");
+      }
+    }
+    return buffer.toString();
+  }
+
+  void _copySpecificList(int tabIndex) {
+    String text = "";
+    if (tabIndex == 0) {
+      // Мусорка
+      final tasks = _box.values.where((t) => t.isDeleted).toList();
+      text = _formatListForClipboard(tasks, "ТАРТАР (Удаленные)");
+    } else if (tabIndex == 1) {
+      // Список дел
+      final tasks = _box.values
+          .where((t) => !t.isDeleted && !t.isCompleted)
+          .toList();
+      text = _formatListForClipboard(tasks, "СПИСОК ДЕЛ");
+    } else {
+      // Ачивки
+      final tasks = _box.values
+          .where((t) => t.isCompleted && !t.isDeleted)
+          .toList();
+      text = _formatListForClipboard(tasks, "ТРИУМФЫ (Выполнено)");
+    }
+
+    if (text.isEmpty) {
+      _showSnackBar("Список пуст");
+    } else {
+      Clipboard.setData(ClipboardData(text: text));
+      _showSnackBar("Список скопирован!");
+    }
+  }
+
+  void _copyAllLists() {
+    final active = _box.values
+        .where((t) => !t.isDeleted && !t.isCompleted)
+        .toList();
+    final completed = _box.values
+        .where((t) => t.isCompleted && !t.isDeleted)
+        .toList();
+    // Удаленные копируем опционально, но раз пользователь просил "все три списка", копируем все
+    final deleted = _box.values.where((t) => t.isDeleted).toList();
+
+    StringBuffer buffer = StringBuffer();
+    buffer.writeln("🏛 **TDL ROMAN REPORT** 🏛");
+    buffer.write(_formatListForClipboard(active, "АКТУАЛЬНОЕ"));
+    buffer.write(_formatListForClipboard(completed, "ВЫПОЛНЕНО"));
+    buffer.write(_formatListForClipboard(deleted, "УДАЛЕНО"));
+
+    Clipboard.setData(ClipboardData(text: buffer.toString()));
+    _showSnackBar("Все списки скопированы!");
+  }
+
+  void _showClipboardMenu(int tabIndex) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(0)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.copy_all, color: Colors.black),
+                title: const Text("Скопировать ВСЕ списки"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _copyAllLists();
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.list, color: Colors.black),
+                title: const Text("Скопировать ЭТОТ список"),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _copySpecificList(tabIndex);
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  void _showSnackBar(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: const TextStyle(fontFamily: 'Times New Roman'),
+        ),
+        backgroundColor: Colors.black87,
+        duration: const Duration(seconds: 1),
+      ),
+    );
+  }
+
   // --- УТИЛИТЫ ИНДЕКСОВ ---
 
-  // Получить индекс, чтобы встать в САМЫЙ ВЕРХ текущего списка
   int _getTopIndexForState({bool deleted = false, bool completed = false}) {
     final tasks = _box.values.where((t) {
       if (deleted) return t.isDeleted;
@@ -154,7 +283,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     return tasks.map((e) => e.sortIndex).reduce(min) - 1;
   }
 
-  // Получить индекс для НИЗА списка (только для активных)
   int _getBottomIndexForActive() {
     final tasks = _box.values.where((t) => !t.isCompleted && !t.isDeleted);
     if (tasks.isEmpty) return 0;
@@ -191,9 +319,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     int importance, {
     int? moveDirection,
   }) {
-    // moveDirection: 0 = Stay, 1 = Top, 2 = Bottom
-    task.title =
-        task.title; // already updated via controller usually, but explicit here
+    task.title = task.title;
     task.urgency = urgency;
     task.importance = importance;
 
@@ -202,13 +328,11 @@ class _RomanHomePageState extends State<RomanHomePage>
     } else if (moveDirection == 2) {
       task.sortIndex = _getBottomIndexForActive();
     }
-    // if 0, index doesn't change
 
     task.save();
     setState(() {});
   }
 
-  // Перемещение в ачивки (Вправо из списка) -> Всегда вверх ачивок
   void _completeTask(Task task) {
     task.isCompleted = true;
     task.isDeleted = false;
@@ -217,16 +341,14 @@ class _RomanHomePageState extends State<RomanHomePage>
     setState(() {});
   }
 
-  // Возврат в работу (Влево из ачивок или Вправо из мусорки) -> Всегда вверх списка
   void _restoreToActive(Task task) {
     task.isCompleted = false;
     task.isDeleted = false;
-    task.sortIndex = _getTopIndexForState(); // Вверх активного списка
+    task.sortIndex = _getTopIndexForState();
     task.save();
     setState(() {});
   }
 
-  // В мусорку (Влево из списка или Вправо из ачивок) -> Всегда вверх мусорки
   void _moveToTrash(Task task) {
     task.isDeleted = true;
     task.isCompleted = false;
@@ -261,7 +383,7 @@ class _RomanHomePageState extends State<RomanHomePage>
   int get _deletedCount => _box.values.where((t) => t.isDeleted).length;
 
   Color get _backgroundColor {
-    if (_currentIndex == 2) return const Color(0xFF121212); // Ачивки - черный
+    if (_currentIndex == 2) return const Color(0xFF121212);
     return const Color(0xFFFFFFFF);
   }
 
@@ -305,15 +427,9 @@ class _RomanHomePageState extends State<RomanHomePage>
                     ? Colors.white38
                     : Colors.black38,
                 tabs: [
-                  _buildTab(
-                    Icons.delete_outline,
-                    _deletedCount,
-                  ), // Вкладка 0: Мусор
-                  _buildTab(Icons.list_alt, _activeCount), // Вкладка 1: Список
-                  _buildTab(
-                    Icons.emoji_events_outlined,
-                    _completedCount,
-                  ), // Вкладка 2: Ачивки
+                  _buildTab(Icons.delete_outline, _deletedCount, 0),
+                  _buildTab(Icons.list_alt, _activeCount, 1),
+                  _buildTab(Icons.emoji_events_outlined, _completedCount, 2),
                 ],
               ),
             ),
@@ -335,30 +451,38 @@ class _RomanHomePageState extends State<RomanHomePage>
               onPressed: () => _showTaskDialog(context),
               backgroundColor: Colors.black,
               foregroundColor: Colors.white,
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.zero,
+              ),
               child: const Icon(Icons.add),
             )
           : null,
     );
   }
 
-  Widget _buildTab(IconData icon, int count) {
-    return Tab(
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 26),
-          if (count > 0) ...[
-            const SizedBox(width: 8),
-            Text(
-              '$count',
-              style: const TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.w600,
-                fontFamily: 'Times New Roman',
+  Widget _buildTab(IconData icon, int count, int index) {
+    return GestureDetector(
+      onLongPress: () {
+        _showClipboardMenu(index);
+      },
+      child: Tab(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 26),
+            if (count > 0) ...[
+              const SizedBox(width: 8),
+              Text(
+                '$count',
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  fontFamily: 'Times New Roman',
+                ),
               ),
-            ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -388,25 +512,24 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   Widget _buildActiveTaskItem(Task task) {
     Color itemBgColor;
-    if (task.urgency > 1 && task.importance > 1)
+    if (task.urgency > 1 && task.importance > 1) {
       itemBgColor = Colors.red.withOpacity(0.08);
-    else if (task.urgency > 1)
+    } else if (task.urgency > 1) {
       itemBgColor = Colors.orange.withOpacity(0.08);
-    else if (task.importance > 1)
+    } else if (task.importance > 1) {
       itemBgColor = Colors.yellow.withOpacity(0.12);
-    else
+    } else {
       itemBgColor = Colors.white;
+    }
 
     return Dismissible(
       key: Key(task.id),
-      // Свайп ВПРАВО (startToEnd) -> В Ачивки
       background: Container(
         color: const Color(0xFFD4AF37),
         alignment: Alignment.centerLeft,
         padding: const EdgeInsets.only(left: 24),
         child: const Icon(Icons.emoji_events, color: Colors.white),
       ),
-      // Свайп ВЛЕВО (endToStart) -> В Мусорку (без вопроса)
       secondaryBackground: Container(
         color: Colors.black,
         alignment: Alignment.centerRight,
@@ -419,7 +542,7 @@ class _RomanHomePageState extends State<RomanHomePage>
         } else {
           _moveToTrash(task);
         }
-        return false; // Возвращаем false, так как мы сами обновляем список через setState
+        return false;
       },
       child: GestureDetector(
         onDoubleTap: () => _showTaskDialog(context, task: task),
@@ -473,7 +596,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   // --- СЛЕВА: МУСОРКА ---
   Widget _buildDeletedTasksList() {
     final tasks = _box.values.where((t) => t.isDeleted).toList();
-    // Сортируем по индексу (чтобы работало "вверх мусорки")
     tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
 
     return ListView.builder(
@@ -484,14 +606,12 @@ class _RomanHomePageState extends State<RomanHomePage>
         final task = tasks[index];
         return Dismissible(
           key: Key(task.id),
-          // Свайп ВПРАВО -> Вернуть в список
           background: Container(
             color: Colors.green,
             alignment: Alignment.centerLeft,
             padding: const EdgeInsets.only(left: 24),
             child: const Icon(Icons.restore, color: Colors.white),
           ),
-          // Свайп ВЛЕВО -> Удалить навсегда (с вопросом)
           secondaryBackground: Container(
             color: Colors.red,
             alignment: Alignment.centerRight,
@@ -548,7 +668,6 @@ class _RomanHomePageState extends State<RomanHomePage>
                   decoration: TextDecoration.lineThrough,
                 ),
               ),
-              // Кнопок больше нет, только свайпы
             ),
           ),
         );
@@ -571,14 +690,12 @@ class _RomanHomePageState extends State<RomanHomePage>
         final task = tasks[index];
         return Dismissible(
           key: Key(task.id),
-          // Свайп ВПРАВО -> В Мусорку
           background: Container(
             color: Colors.black,
             alignment: Alignment.centerLeft,
             padding: const EdgeInsets.only(left: 24),
             child: const Icon(Icons.delete_outline, color: Colors.white),
           ),
-          // Свайп ВЛЕВО -> Вернуть в работу
           secondaryBackground: Container(
             color: Colors.white,
             alignment: Alignment.centerRight,
@@ -645,7 +762,6 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   // --- ДИАЛОГИ ---
 
-  // Выбор места для НОВОЙ важной задачи
   void _showPositionDialog(
     BuildContext context,
     String title,
@@ -700,7 +816,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // Выбор места при РЕДАКТИРОВАНИИ, если статус поменялся
   void _showEditPositionDialog(
     BuildContext context,
     Task task,
@@ -806,7 +921,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     int urgency = task?.urgency ?? 1;
     int importance = task?.importance ?? 1;
 
-    // Запоминаем старые значения, чтобы понять, менялся ли статус
     final int oldUrgency = task?.urgency ?? 1;
     final int oldImportance = task?.importance ?? 1;
 
@@ -853,26 +967,16 @@ class _RomanHomePageState extends State<RomanHomePage>
                 ],
               ),
             ),
+            actionsAlignment: MainAxisAlignment.spaceEvenly,
             actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text(
-                  'ОТМЕНА',
-                  style: TextStyle(color: Colors.grey),
-                ),
-              ),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.black,
-                  foregroundColor: Colors.white,
-                  shape: const RoundedRectangleBorder(
-                    borderRadius: BorderRadius.zero,
-                  ),
-                ),
-                onPressed: () {
+              // Кнопка ОК (Сохранить) - СЛЕВА
+              _buildSquareButton(
+                icon: Icons.check,
+                color: Colors.black,
+                onTap: () {
                   if (titleController.text.trim().isNotEmpty) {
                     if (task == null) {
-                      // --- СОЗДАНИЕ (старая логика) ---
+                      // СОЗДАНИЕ
                       Navigator.pop(ctx);
                       if (urgency == 2) {
                         _saveNewTask(
@@ -897,16 +1001,13 @@ class _RomanHomePageState extends State<RomanHomePage>
                         );
                       }
                     } else {
-                      // --- РЕДАКТИРОВАНИЕ (новая логика) ---
+                      // РЕДАКТИРОВАНИЕ
                       Navigator.pop(ctx);
-
-                      // Проверяем, изменились ли флаги важности/срочности
                       bool statusChanged =
                           (urgency != oldUrgency) ||
                           (importance != oldImportance);
 
                       if (statusChanged) {
-                        // Если статус поменялся, спрашиваем пользователя
                         _showEditPositionDialog(
                           context,
                           task,
@@ -915,9 +1016,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                           importance,
                         );
                       } else {
-                        // Если статус не менялся, просто сохраняем (на том же месте)
                         task.title = titleController.text;
-                        // urgency/importance и так такие же, но обновим
                         _updateTaskAndMove(
                           task,
                           urgency,
@@ -928,11 +1027,70 @@ class _RomanHomePageState extends State<RomanHomePage>
                     }
                   }
                 },
-                child: const Text('ЗАПИСАТЬ'),
+              ),
+
+              // Кнопка ОТМЕНА - ПОСЕРЕДИНЕ
+              _buildSquareButton(
+                icon: Icons.close,
+                color: Colors.black54,
+                onTap: () => Navigator.pop(ctx),
+              ),
+
+              // Кнопка КОПИРОВАТЬ - СПРАВА
+              _buildSquareButton(
+                icon: Icons.copy,
+                color: Colors.black,
+                onTap: () {
+                  if (titleController.text.trim().isNotEmpty) {
+                    // Создаем временный объект для получения эмодзи
+                    final tempTask = Task(
+                      id: 'temp',
+                      title: titleController.text,
+                      createdAt: DateTime.now(),
+                      urgency: urgency,
+                      importance: importance,
+                      isCompleted: task?.isCompleted ?? false,
+                      isDeleted: task?.isDeleted ?? false,
+                    );
+
+                    final emoji = _getTaskEmoji(tempTask);
+                    Clipboard.setData(
+                      ClipboardData(text: "$emoji ${tempTask.title}"),
+                    );
+                    _showSnackBar("Задача скопирована");
+                  }
+                },
               ),
             ],
           );
         },
+      ),
+    );
+  }
+
+  // Виджет квадратной кнопки для диалога
+  Widget _buildSquareButton({
+    required IconData icon,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return SizedBox(
+      width: 50,
+      height: 50,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(4),
+          child: Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: color, width: 2),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            alignment: Alignment.center,
+            child: Icon(icon, color: color, size: 28),
+          ),
+        ),
       ),
     );
   }
