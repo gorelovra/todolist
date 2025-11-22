@@ -1,4 +1,3 @@
-REM .\backup.bat
 @echo off
 chcp 65001 >nul
 echo.
@@ -32,14 +31,15 @@ if exist "%KEY_STORE%" (
     echo [!] ОШИБКА: Ключ upload-keystore.jks не найден!
 )
 
-:: 5. (Бонус) Копирование готового APK (если он есть)
+:: 5. Копирование готового APK
 if exist "%APK_FILE%" (
     copy /Y "%APK_FILE%" "%DEST%\" >nul
     echo [OK] Последний APK-файл сохранен.
 ) else (
-    echo [-] APK файл не найден (возможно, еще не было сборки).
+    echo [-] APK файл не найден -- возможно еще не было сборки.
 )
 
 echo.
 echo --- КОПИРОВАНИЕ ЗАВЕРШЕНО ---
 echo Файлы лежат тут: %DEST%
+pause

@@ -5,6 +5,7 @@ build/
 .packages
 .idea/
 .vscode/
+.gradle/
 *.iml
 *.ipr
 *.iws
