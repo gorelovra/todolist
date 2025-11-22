@@ -162,7 +162,6 @@ class _SplashScreenState extends State<SplashScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // Логотип
             Container(
               width: 100,
               height: 100,
@@ -193,9 +192,8 @@ class _SplashScreenState extends State<SplashScreen> {
               ),
             ),
             const SizedBox(height: 8),
-            // ИСПРАВЛЕНО: Оптимистичная фраза
             const Text(
-              "ACTA NON VERBA", // Дела, а не слова
+              "ACTA NON VERBA",
               style: TextStyle(
                 fontSize: 12,
                 color: Colors.grey,
@@ -204,7 +202,6 @@ class _SplashScreenState extends State<SplashScreen> {
               ),
             ),
             const SizedBox(height: 40),
-            // Версия
             Text(
               _version,
               style: const TextStyle(
@@ -492,7 +489,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // --- LOGIC TASK ---
+  // --- ЛОГИКА ЗАДАЧ ---
 
   int _getTopIndexForState({bool deleted = false, bool completed = false}) {
     final tasks = _box.values.where((t) {
@@ -578,9 +575,10 @@ class _RomanHomePageState extends State<RomanHomePage>
     setState(() {});
   }
 
-  void _permanentlyDelete(String id) {
-    _box.delete(id);
-    setState(() {});
+  // ИСПРАВЛЕНО: Надежное удаление из базы данных
+  Future<void> _permanentlyDelete(Task task) async {
+    await task.delete(); // Удаляем объект Hive напрямую
+    setState(() {}); // Обновляем UI
   }
 
   void _onReorder(int oldIndex, int newIndex, List<Task> currentList) {
@@ -873,6 +871,8 @@ class _RomanHomePageState extends State<RomanHomePage>
     final isSelected = _selectedTaskId == task.id;
 
     Widget content = Container(
+      // ИСПРАВЛЕНО: Добавлен ключ для правильного рендеринга
+      key: ValueKey(task.id),
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
       decoration: _getTaskDecoration(task),
       child: ListTile(
@@ -966,7 +966,11 @@ class _RomanHomePageState extends State<RomanHomePage>
                     ),
                   ),
                   TextButton(
-                    onPressed: () => Navigator.pop(ctx, true),
+                    onPressed: () {
+                      Navigator.pop(ctx, true);
+                      // ИСПРАВЛЕНО: Вызов нового метода удаления
+                      _permanentlyDelete(task);
+                    },
                     child: const Text(
                       'ДА',
                       style: TextStyle(color: Colors.red),
@@ -1030,12 +1034,15 @@ class _RomanHomePageState extends State<RomanHomePage>
   Widget _buildDeletedTasksList() {
     final tasks = _box.values.where((t) => t.isDeleted).toList();
     tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
-    return ListView.builder(
+
+    // ИСПРАВЛЕНО: Обычный ListView вместо builder для списка удаленных,
+    // чтобы избежать проблем с ключами при удалении
+    return ListView(
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.symmetric(vertical: 10),
-      itemCount: tasks.length,
-      itemBuilder: (context, index) =>
-          _buildTaskItem(tasks[index], context, index),
+      children: tasks.asMap().entries.map((entry) {
+        return _buildTaskItem(entry.value, context, entry.key);
+      }).toList(),
     );
   }
 
@@ -1271,13 +1278,6 @@ class _RomanHomePageState extends State<RomanHomePage>
                                       icon: const Icon(Icons.paste),
                                       tooltip: "Вставить",
                                     ),
-                                    IconButton(
-                                      onPressed: () {
-                                        // Здесь можно добавить логику озвучки
-                                      },
-                                      icon: const Icon(Icons.volume_up),
-                                      tooltip: "Озвучить",
-                                    ),
                                   ],
                                 );
                               },
@@ -1288,9 +1288,11 @@ class _RomanHomePageState extends State<RomanHomePage>
 
                       const SizedBox(height: 16),
 
-                      // 2. ПАНЕЛЬ УПРАВЛЕНИЯ
+                      // 2. НИЖНЯЯ ПАНЕЛЬ
                       SizedBox(
-                        height: 120,
+                        // ИСПРАВЛЕНО: Увеличена высота с 120 до 170,
+                        // чтобы влезали кнопки и текст под ними
+                        height: 170,
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
@@ -1299,7 +1301,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
-                                  // РЯД 1: СТАТУС
+                                  // РЯД 1: СТАТУС (0 0)
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
@@ -1343,7 +1345,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                                   ),
                                   const SizedBox(height: 10),
 
-                                  // РЯД 2: КНОПКИ
+                                  // РЯД 2: КНОПКИ (Отмена, Копия, ОК)
                                   Row(
                                     mainAxisAlignment:
                                         MainAxisAlignment.spaceEvenly,
