@@ -364,7 +364,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     final task = _box.get(id);
 
     setState(() {
-      // ИСПРАВЛЕНО: Если это ребенок, не закрываем папки
+      // Если это ребенок, не закрываем папки
       if (task != null && task.parentId == null) {
         _openFolders.clear();
       }
@@ -394,7 +394,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     final task = _box.get(id);
     if (task != null) {
       if (_currentIndex != 1 && task.parentId != null) {
-        return; // Блокировка выделения детей в архивах
+        return;
       }
     }
 
@@ -715,21 +715,43 @@ class _RomanHomePageState extends State<RomanHomePage>
     int importance,
     int positionMode,
     bool isFolder,
+    String? parentId,
   ) {
     int newIndex;
-    if (urgency == 2) {
-      if (positionMode == 0) {
-        newIndex = _getTopIndexForState();
+    // Если создаем внутри папки, считаем индексы детей
+    if (parentId != null) {
+      String pid = parentId;
+      if (urgency == 2) {
+        if (positionMode == 0)
+          newIndex = _getChildTopIndex(pid);
+        else {
+          newIndex = _getChildTargetIndexForUrgentBottom(pid);
+          _shiftChildIndicesDown(pid, newIndex);
+        }
       } else {
-        newIndex = _getTargetIndexForUrgentBottom();
-        _shiftIndicesDown(newIndex);
+        if (positionMode == 0) {
+          newIndex = _getChildTargetIndexForNormalTop(pid);
+          _shiftChildIndicesDown(pid, newIndex);
+        } else
+          newIndex = _getChildBottomIndex(pid);
       }
-    } else {
-      if (positionMode == 0) {
-        newIndex = _getTargetIndexForNormalTop();
-        _shiftIndicesDown(newIndex);
+    }
+    // Если корень
+    else {
+      if (urgency == 2) {
+        if (positionMode == 0) {
+          newIndex = _getTopIndexForState();
+        } else {
+          newIndex = _getTargetIndexForUrgentBottom();
+          _shiftIndicesDown(newIndex);
+        }
       } else {
-        newIndex = _getBottomIndexForActive();
+        if (positionMode == 0) {
+          newIndex = _getTargetIndexForNormalTop();
+          _shiftIndicesDown(newIndex);
+        } else {
+          newIndex = _getBottomIndexForActive();
+        }
       }
     }
 
@@ -741,9 +763,13 @@ class _RomanHomePageState extends State<RomanHomePage>
       importance: importance,
       sortIndex: newIndex,
       isFolder: isFolder,
-      parentId: null,
+      parentId: parentId,
     );
     _box.put(newTask.id, newTask);
+
+    // Включаем мигание
+    _highlightTaskId = newTask.id;
+
     setState(() {});
   }
 
@@ -1077,7 +1103,17 @@ class _RomanHomePageState extends State<RomanHomePage>
               child: Material(
                 color: Colors.transparent,
                 child: InkWell(
-                  onTap: () => _showTaskDialog(context),
+                  onTap: () {
+                    String? targetFolderId;
+                    if (_openFolders.isNotEmpty) {
+                      targetFolderId = _openFolders.first;
+                    }
+                    _showTaskDialog(
+                      context,
+                      task: null,
+                      parentId: targetFolderId,
+                    );
+                  },
                   child: const Icon(Icons.add, color: Colors.black, size: 36),
                 ),
               ),
@@ -1172,16 +1208,16 @@ class _RomanHomePageState extends State<RomanHomePage>
       onToggleExpand: () => _toggleExpand(task.id),
       onToggleSelection: () => _toggleSelection(task.id),
       onDoubleTap: () {
-        // ИСПРАВЛЕНО: Двойной клик разрешен ТОЛЬКО в активном списке (Tab 1)
         if (_currentIndex == 1) {
+          // В активном списке: Папка открывается, Задача редактируется
           if (task.isFolder)
             _toggleFolder(task.id);
           else if (!task.isDeleted && !task.isCompleted)
             _showTaskDialog(context, task: task);
-        }
-        // В других списках - ТОЛЬКО папки открываются
-        else {
+        } else {
+          // В Мусорке/Выполнено: БЛОКИРУЕМ редактирование
           if (task.isFolder) _toggleFolder(task.id);
+          // Иначе ничего не делаем
         }
       },
       onFolderTap: () => _toggleFolder(task.id),
@@ -1390,6 +1426,7 @@ class _RomanHomePageState extends State<RomanHomePage>
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.symmetric(vertical: 10),
       itemCount: flatList.length,
+      // Исправлено: showCup только для таба 2 и для не папок
       itemBuilder: (context, index) {
         bool showCup = (_currentIndex == 2);
         if (_currentIndex == 0) showCup = false;
@@ -1406,8 +1443,8 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // ... (ДИАЛОГ и ХЕЛПЕРЫ без изменений) ...
-  void _showTaskDialog(BuildContext context, {Task? task}) {
+  // --- ДИАЛОГ: ОБНОВЛЕНО (Принимает parentId) ---
+  void _showTaskDialog(BuildContext context, {Task? task, String? parentId}) {
     final titleController = TextEditingController(text: task?.title ?? '');
     int urgency = task?.urgency ?? 1;
     int importance = task?.importance ?? 1;
@@ -1416,6 +1453,9 @@ class _RomanHomePageState extends State<RomanHomePage>
     bool attentionTop = false;
     int blinkStage = 0;
     Timer? attentionTimer;
+
+    // Если создаем в папку, принудительно не папка
+    if (parentId != null) isFolder = false;
 
     showDialog(
       context: context,
@@ -1469,6 +1509,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                     importance,
                     positionMode,
                     isFolder,
+                    parentId,
                   );
                 } else {
                   task.title = titleController.text;
@@ -1524,7 +1565,8 @@ class _RomanHomePageState extends State<RomanHomePage>
                           ),
                         ),
                       ),
-                      if (task == null || task.parentId == null)
+                      if ((task == null || task.parentId == null) &&
+                          parentId == null)
                         Row(
                           children: [
                             Checkbox(
