@@ -361,8 +361,14 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   void _toggleExpand(String id) {
     HapticFeedback.selectionClick();
+    final task = _box.get(id);
+
     setState(() {
-      _openFolders.clear();
+      // ИСПРАВЛЕНО: Если это ребенок, не закрываем папки
+      if (task != null && task.parentId == null) {
+        _openFolders.clear();
+      }
+
       if (_expandedTaskId == id) {
         _expandedTaskId = null;
       } else {
@@ -385,14 +391,10 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _toggleSelection(String id) {
-    // БЛОКИРОВКА ВЫДЕЛЕНИЯ ДЕТЕЙ В МУСОРКЕ И ДОСТИЖЕНИЯХ
-    // Если это не Активный список (Tab 1) и это ребенок (parentId != null), то выделять нельзя.
-    // Папки и корни выделять можно всегда.
     final task = _box.get(id);
     if (task != null) {
       if (_currentIndex != 1 && task.parentId != null) {
-        // Запрет
-        return;
+        return; // Блокировка выделения детей в архивах
       }
     }
 
@@ -1163,7 +1165,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       isFolderOpen: isFolderOpen,
       tabIndex: _currentIndex,
       onBlinkFinished: () {
-        // Таймер отработал, снимаем подсветку
         if (_highlightTaskId == task.id) {
           _highlightTaskId = null;
         }
@@ -1171,9 +1172,16 @@ class _RomanHomePageState extends State<RomanHomePage>
       onToggleExpand: () => _toggleExpand(task.id),
       onToggleSelection: () => _toggleSelection(task.id),
       onDoubleTap: () {
-        if (!task.isDeleted || true) {
-          // Разрешено редактировать везде
-          _showTaskDialog(context, task: task);
+        // ИСПРАВЛЕНО: Двойной клик разрешен ТОЛЬКО в активном списке (Tab 1)
+        if (_currentIndex == 1) {
+          if (task.isFolder)
+            _toggleFolder(task.id);
+          else if (!task.isDeleted && !task.isCompleted)
+            _showTaskDialog(context, task: task);
+        }
+        // В других списках - ТОЛЬКО папки открываются
+        else {
+          if (task.isFolder) _toggleFolder(task.id);
         }
       },
       onFolderTap: () => _toggleFolder(task.id),
@@ -1184,14 +1192,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     // БЛОКИРОВКА СВАЙПОВ ДЛЯ ДЕТЕЙ В МУСОРКЕ И ВЫПОЛНЕННЫХ
     bool isLockedChild = (_currentIndex != 1) && (task.parentId != null);
     if (isLockedChild) {
-      return content; // Возвращаем контент без Dismissible
-    }
-
-    // Если не активный список (Мусорка/Выполнено) для Родителей/Корней - разрешаем Dismissible
-    // Если активный список - разрешаем Dismissible всем (и детям тоже)
-    if (!isReorderable && _currentIndex != 1 && task.parentId != null) {
-      // Доп. защита: если это список без реордера (Архивы) и это ребенок - блокируем.
-      // Но мы уже заблокировали выше.
+      return content;
     }
 
     Widget background;
@@ -2121,6 +2122,7 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
 
     BoxDecoration decoration = widget.decorationBuilder(widget.task);
 
+    // Стиль стопки для папок
     if (widget.task.isFolder &&
         !widget.task.isDeleted &&
         !widget.task.isCompleted) {
