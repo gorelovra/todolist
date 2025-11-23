@@ -2,12 +2,14 @@
 chcp 65001 >nul
 cls
 
+set "SOUND_SUCCESS=C:\Windows\Media\tada.wav"
+set "SOUND_ERROR=C:\Windows\Media\Windows Critical Stop.wav"
+
 echo ==========================================
 echo      АВТОМАТИЧЕСКАЯ СБОРКА TDL-ROMAN
 echo ==========================================
 echo.
 
-:: --- ШАГ 0: АВТО-ИНКРЕМЕНТ ВЕРСИИ ---
 echo [0/5] Поднятие версии (Patch + Build)...
 (
 echo $path = "pubspec.yaml"
@@ -35,19 +37,18 @@ if %errorlevel% neq 0 (
 )
 del update_version.ps1
 
-:: --- ШАГ 1: ОЧИСТКА ---
 echo.
-echo [1/5] Очистка кэша (flutter clean)...
+echo [1/5] Принудительная остановка Java и очистка (flutter clean)...
+taskkill /F /IM java.exe /T 2>nul
+timeout /t 1 /nobreak >nul
 call flutter clean
 if %errorlevel% neq 0 goto error
 
-:: --- ШАГ 2: ЗАГРУЗКА БИБЛИОТЕК (ВАЖНО ДЛЯ ИКОНОК) ---
 echo.
 echo [2/5] Загрузка библиотек (flutter pub get)...
 call flutter pub get
 if %errorlevel% neq 0 goto error
 
-:: --- ШАГ 3: ПРОВЕРКА И ОБНОВЛЕНИЕ ЛОГОТИПА ---
 echo.
 echo [3/5] Проверка логотипа...
 set "CLOUD_ICON=C:\_YandexDisk\YandexDisk\_FTP\_sohrany\tdl_roman\512.png"
@@ -61,13 +62,11 @@ if exist "%CLOUD_ICON%" (
     echo [i] Облачный логотип не найден, используем текущий.
 )
 
-:: --- ШАГ 4: СБОРКА ---
 echo.
 echo [4/5] Сборка Release APK...
 call flutter build apk --release
 if %errorlevel% neq 0 goto error
 
-:: --- ШАГ 5: БЕКАП ---
 echo.
 echo [5/5] Запуск резервного копирования...
 
@@ -107,6 +106,9 @@ echo.
 echo ==========================================
 echo      УСПЕХ! ВЕРСИЯ ПОДНЯТА, ИКОНКИ ПРОВЕРЕНЫ, СОБРАНО, СОХРАНЕНО
 echo ==========================================
+
+powershell -c "(New-Object Media.SoundPlayer '%SOUND_SUCCESS%').PlaySync();"
+
 pause
 exit /b 0
 
@@ -115,5 +117,8 @@ echo.
 echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 echo        ПРОИЗОШЛА ОШИБКА
 echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+
+powershell -c "(New-Object Media.SoundPlayer '%SOUND_ERROR%').PlaySync();"
+
 pause
 exit /b 1

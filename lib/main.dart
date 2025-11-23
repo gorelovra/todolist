@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,6 +10,9 @@ import 'package:uuid/uuid.dart';
 import 'package:flutter_rustore_update/flutter_rustore_update.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
+import 'package:visibility_detector/visibility_detector.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -29,7 +34,6 @@ void main() async {
   runApp(const TdlRomanApp());
 }
 
-// --- МОДЕЛЬ ДАННЫХ ---
 class Task extends HiveObject {
   String id;
   String title;
@@ -50,6 +54,17 @@ class Task extends HiveObject {
     this.importance = 1,
     this.sortIndex = 0,
   });
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'title': title,
+    'isCompleted': isCompleted,
+    'isDeleted': isDeleted,
+    'createdAt': createdAt.millisecondsSinceEpoch,
+    'urgency': urgency,
+    'importance': importance,
+    'sortIndex': sortIndex,
+  };
 }
 
 class TaskAdapter extends TypeAdapter<Task> {
@@ -118,7 +133,6 @@ class TdlRomanApp extends StatelessWidget {
   }
 }
 
-// --- ЭКРАН ПРИВЕТСТВИЯ (SPLASH) ---
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -217,7 +231,6 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 }
 
-// --- ГЛАВНЫЙ ЭКРАН ---
 class RomanHomePage extends StatefulWidget {
   const RomanHomePage({super.key});
 
@@ -233,6 +246,9 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   String? _expandedTaskId;
   String? _selectedTaskId;
+
+  // ID задачи, которая должна помигать при появлении
+  String? _highlightTaskId;
 
   @override
   void initState() {
@@ -258,7 +274,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     RustoreUpdateClient.info()
         .then((info) {
           if (info.updateAvailability == 2) {
-            // 2 = UPDATE_AVAILABLE
             showDialog(
               context: context,
               builder: (ctx) => AlertDialog(
@@ -281,10 +296,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                   TextButton(
                     onPressed: () {
                       Navigator.pop(ctx);
-                      final uri = Uri.parse(
-                        "https://apps.rustore.ru/app/ru.gorelovra.tdlroman",
-                      );
-                      launchUrl(uri, mode: LaunchMode.externalApplication);
+                      _performUpdate();
                     },
                     child: const Text(
                       "Обновить",
@@ -304,13 +316,25 @@ class _RomanHomePageState extends State<RomanHomePage>
         });
   }
 
+  void _performUpdate() {
+    RustoreUpdateClient.download()
+        .then((value) {
+          debugPrint("Загрузка обновления завершена кодом: $value");
+        })
+        .catchError((e) {
+          debugPrint("Ошибка нативной загрузки: $e");
+          final uri = Uri.parse(
+            "https://apps.rustore.ru/app/ru.gorelovra.tdlroman",
+          );
+          launchUrl(uri, mode: LaunchMode.externalApplication);
+        });
+  }
+
   @override
   void dispose() {
     _tabController.dispose();
     super.dispose();
   }
-
-  // --- UI LOGIC ---
 
   void _toggleExpand(String id) {
     HapticFeedback.selectionClick();
@@ -410,6 +434,21 @@ class _RomanHomePageState extends State<RomanHomePage>
     _showSnackBar("ВСЕ списки скопированы!");
   }
 
+  Future<void> _backupData() async {
+    try {
+      final tasks = _box.values.map((e) => e.toJson()).toList();
+      final jsonString = jsonEncode({'tasks': tasks});
+
+      final directory = await getTemporaryDirectory();
+      final file = File('${directory.path}/tdl_backup.json');
+      await file.writeAsString(jsonString);
+
+      await Share.shareXFiles([XFile(file.path)], text: 'TDL-Roman Backup');
+    } catch (e) {
+      _showSnackBar("Ошибка бэкапа: $e");
+    }
+  }
+
   void _showClipboardMenu(int tabIndex) {
     showModalBottomSheet(
       context: context,
@@ -425,14 +464,18 @@ class _RomanHomePageState extends State<RomanHomePage>
             mainAxisSize: MainAxisSize.min,
             children: [
               const Text(
-                "КОПИРОВАНИЕ",
+                "МЕНЮ",
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
               ),
               const SizedBox(height: 20),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
-                  _buildCopyActionButton("ВСЁ", Icons.copy_all, () {
+                  _buildCopyActionButton("БЭКАП", Icons.save, () {
+                    Navigator.pop(ctx);
+                    _backupData();
+                  }),
+                  _buildCopyActionButton("ВЕСЬ ОТЧЕТ", Icons.copy_all, () {
                     Navigator.pop(ctx);
                     _copyAllLists();
                   }),
@@ -472,7 +515,7 @@ class _RomanHomePageState extends State<RomanHomePage>
           const SizedBox(height: 8),
           Text(
             label,
-            style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+            style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
           ),
         ],
       ),
@@ -489,7 +532,25 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // --- ЛОГИКА ЗАДАЧ ---
+  // --- ЛОГИКА ИНДЕКСОВ И СДВИГОВ ---
+
+  // Хелпер: Освободить место по индексу targetIndex (сдвинуть все задачи >= targetIndex на 1 вниз)
+  void _shiftIndicesDown(int targetIndex) {
+    // Берем ВСЕ активные задачи
+    final allActive = _box.values
+        .where((t) => !t.isCompleted && !t.isDeleted)
+        .toList();
+    // Сортируем
+    allActive.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+
+    // Сдвигаем те, кто ниже или равен targetIndex
+    for (var t in allActive) {
+      if (t.sortIndex >= targetIndex) {
+        t.sortIndex += 1;
+        t.save();
+      }
+    }
+  }
 
   int _getTopIndexForState({bool deleted = false, bool completed = false}) {
     final tasks = _box.values.where((t) {
@@ -507,6 +568,46 @@ class _RomanHomePageState extends State<RomanHomePage>
     return tasks.map((e) => e.sortIndex).reduce(max) + 1;
   }
 
+  // Возвращает индекс, куда вставить "Вниз Срочных". Это должно быть НАД первой обычной задачей.
+  int _getTargetIndexForUrgentBottom() {
+    // 1. Ищем самую верхнюю обычную задачу (сосед снизу для срочных)
+    final nonUrgentTasks = _box.values
+        .where((t) => !t.isCompleted && !t.isDeleted && t.urgency != 2)
+        .toList();
+
+    if (nonUrgentTasks.isNotEmpty) {
+      // Если обычные задачи есть, нам нужно встать ПЕРЕД первой обычной
+      final firstNonUrgentIndex = nonUrgentTasks
+          .map((e) => e.sortIndex)
+          .reduce(min);
+      return firstNonUrgentIndex;
+    } else {
+      // Если обычных задач нет, просто ставим в самый низ списка
+      return _getBottomIndexForActive();
+    }
+  }
+
+  // Возвращает индекс для "Вверх Обычных". Это должно быть ПОД последней срочной.
+  int _getTargetIndexForNormalTop() {
+    // 1. Ищем самую нижнюю срочную задачу
+    final urgentTasks = _box.values
+        .where((t) => !t.isCompleted && !t.isDeleted && t.urgency == 2)
+        .toList();
+
+    if (urgentTasks.isNotEmpty) {
+      // Если срочные есть, ставим ПОСЛЕ последней срочной
+      final lastUrgentIndex = urgentTasks.map((e) => e.sortIndex).reduce(max);
+      return lastUrgentIndex + 1;
+    } else {
+      // Если срочных нет, ставим в самый верх списка (но проверив, не занято ли место, логика insert все сделает)
+      final allActive = _box.values
+          .where((t) => !t.isCompleted && !t.isDeleted)
+          .toList();
+      if (allActive.isEmpty) return 0;
+      return allActive.map((e) => e.sortIndex).reduce(min);
+    }
+  }
+
   void _saveNewTask(
     String title,
     int urgency,
@@ -514,10 +615,31 @@ class _RomanHomePageState extends State<RomanHomePage>
     int positionMode,
   ) {
     int newIndex;
-    if (positionMode == 0) {
-      newIndex = _getTopIndexForState();
-    } else {
-      newIndex = _getBottomIndexForActive();
+
+    // Сценарий 1: СРОЧНАЯ ЗАДАЧА
+    if (urgency == 2) {
+      if (positionMode == 0) {
+        // В самый-самый верх
+        newIndex = _getTopIndexForState();
+        // Тут сдвигать не надо, мы просто берем min-1
+      } else {
+        // "Вниз Срочных"
+        newIndex = _getTargetIndexForUrgentBottom();
+        // Здесь возможен конфликт с первой обычной задачей, поэтому сдвигаем
+        _shiftIndicesDown(newIndex);
+      }
+    }
+    // Сценарий 2: ОБЫЧНАЯ ЗАДАЧА
+    else {
+      if (positionMode == 0) {
+        // "Вверх Обычных"
+        newIndex = _getTargetIndexForNormalTop();
+        // Здесь конфликт с первой обычной задачей (она сейчас там), сдвигаем
+        _shiftIndicesDown(newIndex);
+      } else {
+        // В самый-самый низ
+        newIndex = _getBottomIndexForActive();
+      }
     }
 
     final newTask = Task(
@@ -541,12 +663,25 @@ class _RomanHomePageState extends State<RomanHomePage>
     task.urgency = urgency;
     task.importance = importance;
 
-    if (positionMode == 0) {
-      task.sortIndex = _getTopIndexForState();
-    } else if (positionMode == 2) {
-      task.sortIndex = _getBottomIndexForActive();
+    int newIndex = task.sortIndex; // По умолчанию не меняем
+
+    if (task.urgency == 2) {
+      if (positionMode == 0) {
+        newIndex = _getTopIndexForState();
+      } else if (positionMode == 2) {
+        newIndex = _getTargetIndexForUrgentBottom();
+        _shiftIndicesDown(newIndex);
+      }
+    } else {
+      if (positionMode == 0) {
+        newIndex = _getTargetIndexForNormalTop();
+        _shiftIndicesDown(newIndex);
+      } else if (positionMode == 2) {
+        newIndex = _getBottomIndexForActive();
+      }
     }
 
+    task.sortIndex = newIndex;
     task.save();
     setState(() {});
   }
@@ -562,7 +697,20 @@ class _RomanHomePageState extends State<RomanHomePage>
   void _restoreToActive(Task task) {
     task.isCompleted = false;
     task.isDeleted = false;
-    task.sortIndex = _getTopIndexForState();
+
+    int newIndex;
+    if (task.urgency == 2) {
+      // Срочная -> В самый верх
+      newIndex = _getTopIndexForState();
+    } else {
+      // Обычная -> В верх обычных
+      newIndex = _getTargetIndexForNormalTop();
+      _shiftIndicesDown(newIndex);
+    }
+
+    task.sortIndex = newIndex;
+    _highlightTaskId = task.id; // Включаем флаг мигания
+
     task.save();
     setState(() {});
   }
@@ -575,20 +723,43 @@ class _RomanHomePageState extends State<RomanHomePage>
     setState(() {});
   }
 
-  // ИСПРАВЛЕНО: Надежное удаление из базы данных
   Future<void> _permanentlyDelete(Task task) async {
-    await task.delete(); // Удаляем объект Hive напрямую
-    setState(() {}); // Обновляем UI
+    await task.delete();
+    setState(() {});
   }
 
   void _onReorder(int oldIndex, int newIndex, List<Task> currentList) {
     if (oldIndex < newIndex) newIndex -= 1;
     final Task item = currentList.removeAt(oldIndex);
     currentList.insert(newIndex, item);
+
+    bool forcedChange = false;
+
+    if (newIndex > 0) {
+      final Task neighborAbove = currentList[newIndex - 1];
+      if (neighborAbove.urgency != 2) {
+        if (item.urgency == 2) {
+          item.urgency = 1;
+          forcedChange = true;
+        }
+      }
+    }
+
+    if (newIndex < currentList.length - 1) {
+      final Task neighborBelow = currentList[newIndex + 1];
+      if (neighborBelow.urgency == 2) {
+        if (item.urgency != 2) {
+          item.urgency = 2;
+          forcedChange = true;
+        }
+      }
+    }
+
     for (int i = 0; i < currentList.length; i++) {
       currentList[i].sortIndex = i;
       currentList[i].save();
     }
+    if (forcedChange) item.save();
     setState(() {});
   }
 
@@ -713,31 +884,60 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  Widget _buildLeftIndicator(Task task, int index, bool isSelected) {
-    IconData icon;
-    Color bgColor;
-    bool isDouble = false;
-    Color iconColor = Colors.white;
-
+  Widget _buildLeftIndicator(Task task, bool isSelected) {
     if (isSelected) {
-      icon = Icons.swipe;
-      bgColor = Colors.black;
-      iconColor = Colors.white;
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => _toggleSelection(task.id),
+        child: Container(
+          width: 50,
+          color: Colors.transparent,
+          alignment: Alignment.center,
+          child: Container(
+            width: 30,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(4),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black12,
+                  blurRadius: 2,
+                  offset: Offset(0, 1),
+                ),
+              ],
+            ),
+            child: const Icon(Icons.swap_horiz, size: 20, color: Colors.white),
+          ),
+        ),
+      );
+    }
+
+    Widget iconWidget;
+    BoxDecoration decoration;
+
+    if (task.isCompleted && !task.isDeleted) {
+      decoration = BoxDecoration(
+        color: Colors.transparent,
+        border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
+        borderRadius: BorderRadius.circular(4),
+      );
+      iconWidget = const Icon(Icons.check, color: Colors.grey, size: 18);
+    } else if (task.isDeleted) {
+      decoration = BoxDecoration(
+        color: Colors.transparent,
+        border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
+        borderRadius: BorderRadius.circular(4),
+      );
+      iconWidget = const Icon(Icons.close, color: Colors.grey, size: 18);
     } else {
-      if (task.urgency == 2 && task.importance == 2) {
-        isDouble = true;
-        icon = Icons.bolt;
-        bgColor = const Color(0xFFB71C1C);
-      } else if (task.urgency == 2) {
-        icon = Icons.bolt;
-        bgColor = const Color(0xFFCD7F32);
-      } else if (task.importance == 2) {
-        icon = Icons.priority_high;
-        bgColor = const Color(0xFFFFD700);
-      } else {
-        icon = Icons.circle_outlined;
-        bgColor = Colors.transparent;
-      }
+      decoration = BoxDecoration(
+        color: Colors.transparent,
+        border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
+        borderRadius: BorderRadius.circular(4),
+      );
+      iconWidget = const SizedBox();
     }
 
     return GestureDetector(
@@ -746,62 +946,12 @@ class _RomanHomePageState extends State<RomanHomePage>
       child: Container(
         width: 50,
         color: Colors.transparent,
-        alignment: Alignment.centerLeft,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 32,
-              height: 32,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: (bgColor == Colors.transparent && !isSelected)
-                    ? Colors.white
-                    : bgColor,
-                shape: BoxShape.circle,
-                border: (bgColor == Colors.transparent && !isSelected)
-                    ? Border.all(color: Colors.black26, width: 1.5)
-                    : null,
-                boxShadow: (bgColor != Colors.transparent || isSelected)
-                    ? const [
-                        BoxShadow(
-                          color: Colors.black12,
-                          blurRadius: 2,
-                          offset: Offset(0, 1),
-                        ),
-                      ]
-                    : null,
-              ),
-              child: isDouble && !isSelected
-                  ? Row(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: const [
-                        Icon(Icons.bolt, size: 14, color: Colors.white),
-                        Icon(
-                          Icons.priority_high,
-                          size: 14,
-                          color: Colors.white,
-                        ),
-                      ],
-                    )
-                  : (bgColor == Colors.transparent && !isSelected)
-                  ? const SizedBox()
-                  : Icon(
-                      isSelected ? Icons.swap_horiz : icon,
-                      size: 18,
-                      color: iconColor,
-                    ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              "${index + 1}",
-              style: TextStyle(
-                fontSize: 10,
-                color: _currentIndex == 2 ? Colors.white70 : Colors.black54,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
+        alignment: Alignment.center,
+        child: Container(
+          width: 24,
+          height: 24,
+          decoration: decoration,
+          child: iconWidget,
         ),
       ),
     );
@@ -810,13 +960,25 @@ class _RomanHomePageState extends State<RomanHomePage>
   BoxDecoration _getTaskDecoration(Task task) {
     if (task.isCompleted && !task.isDeleted) {
       if (task.urgency == 2 && task.importance == 2) {
-        return _grad([Color(0xFFBF953F), Color(0xFFFCF6BA), Color(0xFFAA771C)]);
+        return _grad([
+          const Color(0xFFBF953F),
+          const Color(0xFFFCF6BA),
+          const Color(0xFFAA771C),
+        ]);
       }
       if (task.importance == 2) {
-        return _grad([Color(0xFFE0E0E0), Color(0xFFFFFFFF), Color(0xFFAAAAAA)]);
+        return _grad([
+          const Color(0xFFE0E0E0),
+          const Color(0xFFFFFFFF),
+          const Color(0xFFAAAAAA),
+        ]);
       }
       if (task.urgency == 2) {
-        return _grad([Color(0xFFCD7F32), Color(0xFFFFCC99), Color(0xFFA0522D)]);
+        return _grad([
+          const Color(0xFFCD7F32),
+          const Color(0xFFFFCC99),
+          const Color(0xFFA0522D),
+        ]);
       }
       return BoxDecoration(
         color: const Color(0xFF8D6E63),
@@ -860,60 +1022,32 @@ class _RomanHomePageState extends State<RomanHomePage>
     int index, {
     bool showCup = false,
   }) {
-    Color textColor = Colors.black87;
-    if (task.isCompleted && !task.isDeleted) {
-      if (task.urgency == 1 && task.importance == 1) textColor = Colors.white;
-    } else if (task.isDeleted) {
-      textColor = Colors.grey;
-    }
-
     final isExpanded = _expandedTaskId == task.id;
     final isSelected = _selectedTaskId == task.id;
+    final shouldBlink = _highlightTaskId == task.id;
 
-    Widget content = Container(
-      // ИСПРАВЛЕНО: Добавлен ключ для правильного рендеринга
+    Widget content = TaskItemWidget(
       key: ValueKey(task.id),
-      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-      decoration: _getTaskDecoration(task),
-      child: ListTile(
-        contentPadding: const EdgeInsets.only(
-          left: 10,
-          right: 16,
-          top: 8,
-          bottom: 8,
-        ),
-        leading: _buildLeftIndicator(task, index, isSelected),
-        title: Text(
-          task.title,
-          maxLines: isExpanded ? null : 2,
-          overflow: isExpanded ? null : TextOverflow.ellipsis,
-          style: TextStyle(
-            fontSize: 18,
-            color: textColor,
-            height: 1.2,
-            fontWeight: (task.importance > 1 && !task.isDeleted)
-                ? FontWeight.bold
-                : FontWeight.normal,
-            decoration: task.isDeleted
-                ? TextDecoration.lineThrough
-                : TextDecoration.none,
-            decorationColor: Colors.grey,
-          ),
-        ),
-        trailing: showCup
-            ? const Icon(Icons.emoji_events, color: Colors.white, size: 28)
-            : null,
-      ),
-    );
-
-    content = GestureDetector(
-      onTap: () => _toggleExpand(task.id),
+      task: task,
+      index: index,
+      isExpanded: isExpanded,
+      isSelected: isSelected,
+      showCup: showCup,
+      shouldBlink: shouldBlink,
+      onBlinkFinished: () {
+        if (_highlightTaskId == task.id) {
+          _highlightTaskId = null;
+        }
+      },
+      onToggleExpand: () => _toggleExpand(task.id),
+      onToggleSelection: () => _toggleSelection(task.id),
       onDoubleTap: () {
         if (!task.isDeleted && !task.isCompleted) {
           _showTaskDialog(context, task: task);
         }
       },
-      child: content,
+      decorationBuilder: _getTaskDecoration,
+      indicatorBuilder: _buildLeftIndicator,
     );
 
     return Dismissible(
@@ -968,7 +1102,6 @@ class _RomanHomePageState extends State<RomanHomePage>
                   TextButton(
                     onPressed: () {
                       Navigator.pop(ctx, true);
-                      // ИСПРАВЛЕНО: Вызов нового метода удаления
                       _permanentlyDelete(task);
                     },
                     child: const Text(
@@ -1035,8 +1168,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     final tasks = _box.values.where((t) => t.isDeleted).toList();
     tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
 
-    // ИСПРАВЛЕНО: Обычный ListView вместо builder для списка удаленных,
-    // чтобы избежать проблем с ключами при удалении
     return ListView(
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.symmetric(vertical: 10),
@@ -1046,12 +1177,12 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // --- ДИАЛОГ ЗАДАЧИ ---
   void _showTaskDialog(BuildContext context, {Task? task}) {
     final titleController = TextEditingController(text: task?.title ?? '');
     int urgency = task?.urgency ?? 1;
     int importance = task?.importance ?? 1;
-    int positionMode = 1;
+    int positionMode = task == null ? 2 : 1;
+
     bool attentionTop = false;
     int blinkStage = 0;
     Timer? attentionTimer;
@@ -1101,6 +1232,7 @@ class _RomanHomePageState extends State<RomanHomePage>
 
             Widget buildStateButton({
               required IconData icon,
+              required String label,
               required bool isActive,
               required Color activeColor,
               required VoidCallback onTap,
@@ -1110,27 +1242,42 @@ class _RomanHomePageState extends State<RomanHomePage>
                   HapticFeedback.lightImpact();
                   onTap();
                 },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  width: 45,
-                  height: 45,
-                  decoration: BoxDecoration(
-                    color: Colors.transparent,
-                    shape: BoxShape.circle,
-                    border: Border.all(
-                      color: isActive
-                          ? activeColor
-                          : Colors.grey.withOpacity(0.3),
-                      width: 2,
+                child: Column(
+                  children: [
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      width: 45,
+                      height: 45,
+                      decoration: BoxDecoration(
+                        color: Colors.transparent,
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: isActive
+                              ? activeColor
+                              : Colors.grey.withOpacity(0.3),
+                          width: 2,
+                        ),
+                      ),
+                      child: Icon(
+                        icon,
+                        color: isActive
+                            ? activeColor
+                            : Colors.grey.withOpacity(0.3),
+                        size: 26,
+                      ),
                     ),
-                  ),
-                  child: Icon(
-                    icon,
-                    color: isActive
-                        ? activeColor
-                        : Colors.grey.withOpacity(0.3),
-                    size: 26,
-                  ),
+                    const SizedBox(height: 4),
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: isActive ? activeColor : Colors.grey,
+                        fontWeight: isActive
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                      ),
+                    ),
+                  ],
                 ),
               );
             }
@@ -1186,7 +1333,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                     titleController.text,
                     urgency,
                     importance,
-                    positionMode == 1 ? 2 : positionMode,
+                    positionMode,
                   );
                 } else {
                   task.title = titleController.text;
@@ -1197,7 +1344,9 @@ class _RomanHomePageState extends State<RomanHomePage>
             }
 
             return Dialog(
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.zero),
+              shape: const RoundedRectangleBorder(
+                borderRadius: BorderRadius.zero,
+              ),
               backgroundColor: Colors.white,
               insetPadding: const EdgeInsets.symmetric(
                 horizontal: 12,
@@ -1210,7 +1359,6 @@ class _RomanHomePageState extends State<RomanHomePage>
                   padding: const EdgeInsets.all(16),
                   child: Column(
                     children: [
-                      // 1. ТЕКСТОВОЕ ПОЛЕ С МЕНЮ
                       Expanded(
                         child: Container(
                           decoration: BoxDecoration(
@@ -1288,25 +1436,21 @@ class _RomanHomePageState extends State<RomanHomePage>
 
                       const SizedBox(height: 16),
 
-                      // 2. НИЖНЯЯ ПАНЕЛЬ
                       SizedBox(
-                        // ИСПРАВЛЕНО: Увеличена высота с 120 до 170,
-                        // чтобы влезали кнопки и текст под ними
                         height: 170,
                         child: Row(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            // БОЛЬШОЙ ЛЕВЫЙ БЛОК
                             Expanded(
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
-                                  // РЯД 1: СТАТУС (0 0)
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
                                       buildStateButton(
                                         icon: Icons.bolt,
+                                        label: "Срочно",
                                         isActive: urgency == 2,
                                         activeColor: Colors.red,
                                         onTap: () {
@@ -1320,6 +1464,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                                       const SizedBox(width: 20),
                                       buildStateButton(
                                         icon: Icons.priority_high,
+                                        label: "Важно",
                                         isActive: importance == 2,
                                         activeColor: Colors.orange,
                                         onTap: () {
@@ -1335,17 +1480,8 @@ class _RomanHomePageState extends State<RomanHomePage>
                                     ],
                                   ),
 
-                                  const SizedBox(height: 4),
-                                  const Text(
-                                    "Статус",
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
                                   const SizedBox(height: 10),
 
-                                  // РЯД 2: КНОПКИ (Отмена, Копия, ОК)
                                   Row(
                                     mainAxisAlignment:
                                         MainAxisAlignment.spaceEvenly,
@@ -1369,17 +1505,9 @@ class _RomanHomePageState extends State<RomanHomePage>
                                           if (titleController.text
                                               .trim()
                                               .isNotEmpty) {
-                                            final tempTask = Task(
-                                              id: 't',
-                                              title: titleController.text,
-                                              createdAt: DateTime.now(),
-                                              urgency: urgency,
-                                              importance: importance,
-                                            );
                                             Clipboard.setData(
                                               ClipboardData(
-                                                text:
-                                                    "${_getTaskEmoji(tempTask)} ${tempTask.title}",
+                                                text: titleController.text,
                                               ),
                                             );
                                             _showSnackBar("Текст скопирован");
@@ -1401,7 +1529,6 @@ class _RomanHomePageState extends State<RomanHomePage>
 
                             const SizedBox(width: 10),
 
-                            // ПРАВЫЙ СТОЛБИК: ПОЗИЦИЯ
                             SizedBox(
                               width: 50,
                               child: Column(
@@ -1468,6 +1595,160 @@ class _RomanHomePageState extends State<RomanHomePage>
         const SizedBox(height: 4),
         Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
       ],
+    );
+  }
+}
+
+// --- ОТДЕЛЬНЫЙ ВИДЖЕТ ЗАДАЧИ ДЛЯ АНИМАЦИИ ---
+class TaskItemWidget extends StatefulWidget {
+  final Task task;
+  final int index;
+  final bool isExpanded;
+  final bool isSelected;
+  final bool showCup;
+  final bool shouldBlink;
+  final VoidCallback onBlinkFinished;
+  final VoidCallback onToggleExpand;
+  final VoidCallback onToggleSelection;
+  final VoidCallback onDoubleTap;
+  final BoxDecoration Function(Task) decorationBuilder;
+  final Widget Function(Task, bool) indicatorBuilder;
+
+  const TaskItemWidget({
+    Key? key,
+    required this.task,
+    required this.index,
+    required this.isExpanded,
+    required this.isSelected,
+    this.showCup = false,
+    this.shouldBlink = false,
+    required this.onBlinkFinished,
+    required this.onToggleExpand,
+    required this.onToggleSelection,
+    required this.onDoubleTap,
+    required this.decorationBuilder,
+    required this.indicatorBuilder,
+  }) : super(key: key);
+
+  @override
+  State<TaskItemWidget> createState() => _TaskItemWidgetState();
+}
+
+class _TaskItemWidgetState extends State<TaskItemWidget> {
+  bool _isHighlighed = false;
+  Timer? _blinkTimer;
+  bool _hasBlinked = false; // Чтобы не моргать повторно при скролле туда-сюда
+
+  @override
+  void initState() {
+    super.initState();
+    // Больше не стартуем в initState
+  }
+
+  void _startBlinking() {
+    if (_blinkTimer != null || _hasBlinked) return; // Защита от повтора
+    _hasBlinked = true;
+
+    int count = 0;
+    _isHighlighed = true;
+
+    _blinkTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      setState(() {
+        _isHighlighed = !_isHighlighed;
+      });
+      count++;
+      if (count >= 5) {
+        timer.cancel();
+        setState(() {
+          _isHighlighed = false;
+        });
+        widget.onBlinkFinished();
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _blinkTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Color textColor = Colors.black87;
+    FontWeight fontWeight = FontWeight.normal;
+
+    if (widget.task.isCompleted && !widget.task.isDeleted) {
+      if (widget.task.urgency == 1 && widget.task.importance == 1)
+        textColor = Colors.white;
+      if (widget.task.importance == 2) fontWeight = FontWeight.bold;
+    } else if (widget.task.isDeleted) {
+      textColor = Colors.grey;
+    } else {
+      if (widget.task.urgency == 2) textColor = const Color(0xFFD32F2F);
+      if (widget.task.importance == 2) fontWeight = FontWeight.bold;
+    }
+
+    BoxDecoration decoration = widget.decorationBuilder(widget.task);
+
+    if (_isHighlighed) {
+      decoration = decoration.copyWith(
+        border: Border.all(color: Colors.red, width: 3),
+      );
+    }
+
+    Widget content = Container(
+      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+      decoration: decoration,
+      child: ListTile(
+        contentPadding: const EdgeInsets.only(
+          left: 10,
+          right: 16,
+          top: 8,
+          bottom: 8,
+        ),
+        leading: widget.indicatorBuilder(widget.task, widget.isSelected),
+        title: Text(
+          widget.task.title,
+          maxLines: widget.isExpanded ? null : 2,
+          overflow: widget.isExpanded ? null : TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 18,
+            color: textColor,
+            height: 1.2,
+            fontWeight: fontWeight,
+            decoration: widget.task.isDeleted
+                ? TextDecoration.lineThrough
+                : TextDecoration.none,
+            decorationColor: Colors.grey,
+          ),
+        ),
+        trailing: widget.showCup
+            ? const Icon(Icons.emoji_events, color: Colors.white, size: 28)
+            : null,
+      ),
+    );
+
+    content = GestureDetector(
+      onTap: widget.onToggleExpand,
+      onDoubleTap: widget.onDoubleTap,
+      child: content,
+    );
+
+    // Оборачиваем в VisibilityDetector, чтобы узнать, когда мы на экране
+    return VisibilityDetector(
+      key: Key('vis_${widget.task.id}'),
+      onVisibilityChanged: (info) {
+        // Если элемент виден более чем на 50% и должен мигать -> запускаем
+        if (widget.shouldBlink && info.visibleFraction > 0.5) {
+          _startBlinking();
+        }
+      },
+      child: content,
     );
   }
 }
