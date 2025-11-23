@@ -247,7 +247,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   String? _expandedTaskId;
   String? _selectedTaskId;
 
-  // ID задачи, которая должна помигать при появлении
   String? _highlightTaskId;
 
   @override
@@ -534,16 +533,12 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   // --- ЛОГИКА ИНДЕКСОВ И СДВИГОВ ---
 
-  // Хелпер: Освободить место по индексу targetIndex (сдвинуть все задачи >= targetIndex на 1 вниз)
   void _shiftIndicesDown(int targetIndex) {
-    // Берем ВСЕ активные задачи
     final allActive = _box.values
         .where((t) => !t.isCompleted && !t.isDeleted)
         .toList();
-    // Сортируем
     allActive.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
 
-    // Сдвигаем те, кто ниже или равен targetIndex
     for (var t in allActive) {
       if (t.sortIndex >= targetIndex) {
         t.sortIndex += 1;
@@ -568,38 +563,30 @@ class _RomanHomePageState extends State<RomanHomePage>
     return tasks.map((e) => e.sortIndex).reduce(max) + 1;
   }
 
-  // Возвращает индекс, куда вставить "Вниз Срочных". Это должно быть НАД первой обычной задачей.
   int _getTargetIndexForUrgentBottom() {
-    // 1. Ищем самую верхнюю обычную задачу (сосед снизу для срочных)
     final nonUrgentTasks = _box.values
         .where((t) => !t.isCompleted && !t.isDeleted && t.urgency != 2)
         .toList();
 
     if (nonUrgentTasks.isNotEmpty) {
-      // Если обычные задачи есть, нам нужно встать ПЕРЕД первой обычной
       final firstNonUrgentIndex = nonUrgentTasks
           .map((e) => e.sortIndex)
           .reduce(min);
       return firstNonUrgentIndex;
     } else {
-      // Если обычных задач нет, просто ставим в самый низ списка
       return _getBottomIndexForActive();
     }
   }
 
-  // Возвращает индекс для "Вверх Обычных". Это должно быть ПОД последней срочной.
   int _getTargetIndexForNormalTop() {
-    // 1. Ищем самую нижнюю срочную задачу
     final urgentTasks = _box.values
         .where((t) => !t.isCompleted && !t.isDeleted && t.urgency == 2)
         .toList();
 
     if (urgentTasks.isNotEmpty) {
-      // Если срочные есть, ставим ПОСЛЕ последней срочной
       final lastUrgentIndex = urgentTasks.map((e) => e.sortIndex).reduce(max);
       return lastUrgentIndex + 1;
     } else {
-      // Если срочных нет, ставим в самый верх списка (но проверив, не занято ли место, логика insert все сделает)
       final allActive = _box.values
           .where((t) => !t.isCompleted && !t.isDeleted)
           .toList();
@@ -616,28 +603,18 @@ class _RomanHomePageState extends State<RomanHomePage>
   ) {
     int newIndex;
 
-    // Сценарий 1: СРОЧНАЯ ЗАДАЧА
     if (urgency == 2) {
       if (positionMode == 0) {
-        // В самый-самый верх
         newIndex = _getTopIndexForState();
-        // Тут сдвигать не надо, мы просто берем min-1
       } else {
-        // "Вниз Срочных"
         newIndex = _getTargetIndexForUrgentBottom();
-        // Здесь возможен конфликт с первой обычной задачей, поэтому сдвигаем
         _shiftIndicesDown(newIndex);
       }
-    }
-    // Сценарий 2: ОБЫЧНАЯ ЗАДАЧА
-    else {
+    } else {
       if (positionMode == 0) {
-        // "Вверх Обычных"
         newIndex = _getTargetIndexForNormalTop();
-        // Здесь конфликт с первой обычной задачей (она сейчас там), сдвигаем
         _shiftIndicesDown(newIndex);
       } else {
-        // В самый-самый низ
         newIndex = _getBottomIndexForActive();
       }
     }
@@ -663,7 +640,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     task.urgency = urgency;
     task.importance = importance;
 
-    int newIndex = task.sortIndex; // По умолчанию не меняем
+    int newIndex = task.sortIndex;
 
     if (task.urgency == 2) {
       if (positionMode == 0) {
@@ -690,6 +667,8 @@ class _RomanHomePageState extends State<RomanHomePage>
     task.isCompleted = true;
     task.isDeleted = false;
     task.sortIndex = _getTopIndexForState(completed: true);
+
+    _highlightTaskId = task.id;
     task.save();
     setState(() {});
   }
@@ -700,16 +679,14 @@ class _RomanHomePageState extends State<RomanHomePage>
 
     int newIndex;
     if (task.urgency == 2) {
-      // Срочная -> В самый верх
       newIndex = _getTopIndexForState();
     } else {
-      // Обычная -> В верх обычных
       newIndex = _getTargetIndexForNormalTop();
       _shiftIndicesDown(newIndex);
     }
 
     task.sortIndex = newIndex;
-    _highlightTaskId = task.id; // Включаем флаг мигания
+    _highlightTaskId = task.id;
 
     task.save();
     setState(() {});
@@ -719,6 +696,8 @@ class _RomanHomePageState extends State<RomanHomePage>
     task.isDeleted = true;
     task.isCompleted = false;
     task.sortIndex = _getTopIndexForState(deleted: true);
+
+    _highlightTaskId = task.id;
     task.save();
     setState(() {});
   }
@@ -1016,6 +995,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 2)),
   ];
 
+  // --- СБОРКА ЭЛЕМЕНТА СПИСКА (СВАЙПЫ И ИКОНКИ) ---
   Widget _buildTaskItem(
     Task task,
     BuildContext context,
@@ -1050,12 +1030,64 @@ class _RomanHomePageState extends State<RomanHomePage>
       indicatorBuilder: _buildLeftIndicator,
     );
 
-    return Dismissible(
-      key: Key(task.id),
-      direction: isSelected
-          ? DismissDirection.horizontal
-          : DismissDirection.none,
-      background: Container(
+    // ОПРЕДЕЛЕНИЕ ИКОНОК И ЦВЕТОВ ФОНА ДЛЯ СВАЙПА
+    Widget background;
+    Widget secondaryBackground;
+
+    if (task.isCompleted && !task.isDeleted) {
+      // --- ВКЛАДКА ВЫПОЛНЕНО ---
+      // Свайп ВПРАВО (StartToEnd) -> В МУСОРКУ
+      background = Container(
+        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+        decoration: BoxDecoration(
+          color: Colors.black, // Черный (Мусорка)
+          borderRadius: BorderRadius.circular(8),
+        ),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 24),
+        child: const Icon(Icons.delete_outline, color: Colors.white),
+      );
+
+      // Свайп ВЛЕВО (EndToStart) -> ВОССТАНОВИТЬ (Список)
+      secondaryBackground = Container(
+        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFD4AF37), // Золотой (Список/Актив)
+          borderRadius: BorderRadius.circular(8),
+        ),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 24),
+        child: const Icon(Icons.list_alt, color: Colors.white),
+      );
+    } else if (task.isDeleted) {
+      // --- ВКЛАДКА МУСОРКА ---
+      // Свайп ВПРАВО (StartToEnd) -> ВОССТАНОВИТЬ (Список)
+      background = Container(
+        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+        decoration: BoxDecoration(
+          color: const Color(0xFFD4AF37), // Золотой (Список)
+          borderRadius: BorderRadius.circular(8),
+        ),
+        alignment: Alignment.centerLeft,
+        padding: const EdgeInsets.only(left: 24),
+        child: const Icon(Icons.list_alt, color: Colors.white),
+      );
+
+      // Свайп ВЛЕВО (EndToStart) -> УДАЛИТЬ НАВСЕГДА
+      secondaryBackground = Container(
+        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+        decoration: BoxDecoration(
+          color: Colors.red[900], // Темно-красный (Удаление)
+          borderRadius: BorderRadius.circular(8),
+        ),
+        alignment: Alignment.centerRight,
+        padding: const EdgeInsets.only(right: 24),
+        child: const Icon(Icons.delete_forever, color: Colors.white),
+      );
+    } else {
+      // --- ВКЛАДКА АКТИВНЫЕ (по умолчанию) ---
+      // Свайп ВПРАВО -> ВЫПОЛНИТЬ (Кубок)
+      background = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
           color: const Color(0xFFD4AF37),
@@ -1064,8 +1096,10 @@ class _RomanHomePageState extends State<RomanHomePage>
         alignment: Alignment.centerLeft,
         padding: const EdgeInsets.only(left: 24),
         child: const Icon(Icons.emoji_events, color: Colors.white),
-      ),
-      secondaryBackground: Container(
+      );
+
+      // Свайп ВЛЕВО -> УДАЛИТЬ (Мусорка)
+      secondaryBackground = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
           color: Colors.black,
@@ -1074,18 +1108,30 @@ class _RomanHomePageState extends State<RomanHomePage>
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 24),
         child: const Icon(Icons.delete_outline, color: Colors.white),
-      ),
+      );
+    }
+
+    return Dismissible(
+      key: Key(task.id),
+      direction: isSelected
+          ? DismissDirection.horizontal
+          : DismissDirection.none,
+      background: background,
+      secondaryBackground: secondaryBackground,
       confirmDismiss: (direction) async {
         if (direction == DismissDirection.startToEnd) {
+          // --- СВАЙП ВПРАВО ---
           if (task.isDeleted) {
-            _restoreToActive(task);
+            _restoreToActive(task); // Из мусорки -> в актив
           } else if (task.isCompleted) {
-            _moveToTrash(task);
+            _moveToTrash(task); // Из выполненных -> в мусорку
           } else {
-            _completeTask(task);
+            _completeTask(task); // Из активных -> в выполнено
           }
         } else {
+          // --- СВАЙП ВЛЕВО ---
           if (task.isDeleted) {
+            // Из мусорки -> Удалить навсегда
             return await showDialog(
               context: context,
               builder: (ctx) => AlertDialog(
@@ -1113,9 +1159,9 @@ class _RomanHomePageState extends State<RomanHomePage>
               ),
             );
           } else if (task.isCompleted) {
-            _restoreToActive(task);
+            _restoreToActive(task); // Из выполненных -> в актив
           } else {
-            _moveToTrash(task);
+            _moveToTrash(task); // Из активных -> в мусорку
           }
         }
         _selectedTaskId = null;
@@ -1637,22 +1683,22 @@ class TaskItemWidget extends StatefulWidget {
 class _TaskItemWidgetState extends State<TaskItemWidget> {
   bool _isHighlighed = false;
   Timer? _blinkTimer;
-  bool _hasBlinked = false; // Чтобы не моргать повторно при скролле туда-сюда
+  bool _hasBlinked = false;
 
   @override
   void initState() {
     super.initState();
-    // Больше не стартуем в initState
   }
 
   void _startBlinking() {
-    if (_blinkTimer != null || _hasBlinked) return; // Защита от повтора
+    if (_blinkTimer != null || _hasBlinked) return;
     _hasBlinked = true;
 
     int count = 0;
     _isHighlighed = true;
 
-    _blinkTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) {
+    // УСКОРЕНО В 3 РАЗА (100 мс)
+    _blinkTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
       if (!mounted) {
         timer.cancel();
         return;
@@ -1661,7 +1707,8 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
         _isHighlighed = !_isHighlighed;
       });
       count++;
-      if (count >= 5) {
+      // 5 раз моргнуть = 10 переключений
+      if (count >= 10) {
         timer.cancel();
         setState(() {
           _isHighlighed = false;
@@ -1704,46 +1751,49 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
     Widget content = Container(
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
       decoration: decoration,
-      child: ListTile(
-        contentPadding: const EdgeInsets.only(
-          left: 10,
-          right: 16,
-          top: 8,
-          bottom: 8,
-        ),
-        leading: widget.indicatorBuilder(widget.task, widget.isSelected),
-        title: Text(
-          widget.task.title,
-          maxLines: widget.isExpanded ? null : 2,
-          overflow: widget.isExpanded ? null : TextOverflow.ellipsis,
-          style: TextStyle(
-            fontSize: 18,
-            color: textColor,
-            height: 1.2,
-            fontWeight: fontWeight,
-            decoration: widget.task.isDeleted
-                ? TextDecoration.lineThrough
-                : TextDecoration.none,
-            decorationColor: Colors.grey,
+      child: InkWell(
+        onTap: widget.onToggleExpand,
+        onDoubleTap: widget.onDoubleTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(right: 12),
+                child: widget.indicatorBuilder(widget.task, widget.isSelected),
+              ),
+              Expanded(
+                child: Text(
+                  widget.task.title,
+                  maxLines: widget.isExpanded ? null : 2,
+                  overflow: widget.isExpanded ? null : TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: textColor,
+                    height: 1.2,
+                    fontWeight: fontWeight,
+                    decoration: widget.task.isDeleted
+                        ? TextDecoration.lineThrough
+                        : TextDecoration.none,
+                    decorationColor: Colors.grey,
+                  ),
+                ),
+              ),
+              if (widget.showCup) ...[
+                const SizedBox(width: 8),
+                const Icon(Icons.emoji_events, color: Colors.white, size: 28),
+              ],
+            ],
           ),
         ),
-        trailing: widget.showCup
-            ? const Icon(Icons.emoji_events, color: Colors.white, size: 28)
-            : null,
       ),
     );
 
-    content = GestureDetector(
-      onTap: widget.onToggleExpand,
-      onDoubleTap: widget.onDoubleTap,
-      child: content,
-    );
-
-    // Оборачиваем в VisibilityDetector, чтобы узнать, когда мы на экране
     return VisibilityDetector(
       key: Key('vis_${widget.task.id}'),
       onVisibilityChanged: (info) {
-        // Если элемент виден более чем на 50% и должен мигать -> запускаем
         if (widget.shouldBlink && info.visibleFraction > 0.5) {
           _startBlinking();
         }
