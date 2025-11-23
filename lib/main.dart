@@ -34,6 +34,7 @@ void main() async {
   runApp(const TdlRomanApp());
 }
 
+// --- МОДЕЛЬ ДАННЫХ ---
 class Task extends HiveObject {
   String id;
   String title;
@@ -44,6 +45,9 @@ class Task extends HiveObject {
   int importance;
   int sortIndex;
 
+  bool isFolder;
+  String? parentId;
+
   Task({
     required this.id,
     required this.title,
@@ -53,6 +57,8 @@ class Task extends HiveObject {
     this.urgency = 1,
     this.importance = 1,
     this.sortIndex = 0,
+    this.isFolder = false,
+    this.parentId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -64,6 +70,8 @@ class Task extends HiveObject {
     'urgency': urgency,
     'importance': importance,
     'sortIndex': sortIndex,
+    'isFolder': isFolder,
+    'parentId': parentId,
   };
 }
 
@@ -82,6 +90,17 @@ class TaskAdapter extends TypeAdapter<Task> {
     final importance = reader.readInt();
     final sortIndex = reader.availableBytes > 0 ? reader.readInt() : 0;
 
+    final isFolder = reader.availableBytes > 0 ? reader.readBool() : false;
+    String? parentId;
+    if (reader.availableBytes > 0) {
+      try {
+        parentId = reader.readString();
+        if (parentId.isEmpty) parentId = null;
+      } catch (e) {
+        parentId = null;
+      }
+    }
+
     return Task(
       id: id,
       title: title,
@@ -91,6 +110,8 @@ class TaskAdapter extends TypeAdapter<Task> {
       urgency: urgency,
       importance: importance,
       sortIndex: sortIndex,
+      isFolder: isFolder,
+      parentId: parentId,
     );
   }
 
@@ -104,6 +125,8 @@ class TaskAdapter extends TypeAdapter<Task> {
     writer.writeInt(obj.urgency);
     writer.writeInt(obj.importance);
     writer.writeInt(obj.sortIndex);
+    writer.writeBool(obj.isFolder);
+    writer.writeString(obj.parentId ?? "");
   }
 }
 
@@ -246,8 +269,9 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   String? _expandedTaskId;
   String? _selectedTaskId;
-
   String? _highlightTaskId;
+
+  final Set<String> _openFolders = {};
 
   @override
   void initState() {
@@ -338,6 +362,7 @@ class _RomanHomePageState extends State<RomanHomePage>
   void _toggleExpand(String id) {
     HapticFeedback.selectionClick();
     setState(() {
+      _openFolders.clear();
       if (_expandedTaskId == id) {
         _expandedTaskId = null;
       } else {
@@ -346,7 +371,31 @@ class _RomanHomePageState extends State<RomanHomePage>
     });
   }
 
+  void _toggleFolder(String folderId) {
+    HapticFeedback.lightImpact();
+    setState(() {
+      _expandedTaskId = null;
+      if (_openFolders.contains(folderId)) {
+        _openFolders.remove(folderId);
+      } else {
+        _openFolders.clear();
+        _openFolders.add(folderId);
+      }
+    });
+  }
+
   void _toggleSelection(String id) {
+    // БЛОКИРОВКА ВЫДЕЛЕНИЯ ДЕТЕЙ В МУСОРКЕ И ДОСТИЖЕНИЯХ
+    // Если это не Активный список (Tab 1) и это ребенок (parentId != null), то выделять нельзя.
+    // Папки и корни выделять можно всегда.
+    final task = _box.get(id);
+    if (task != null) {
+      if (_currentIndex != 1 && task.parentId != null) {
+        // Запрет
+        return;
+      }
+    }
+
     HapticFeedback.mediumImpact();
     setState(() {
       if (_selectedTaskId == id) {
@@ -358,9 +407,9 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   String _getTaskEmoji(Task t) {
-    if (t.isDeleted) return "☒"; // Удалено
-    if (t.isCompleted) return "✅"; // Выполнено
-    return "☑️"; // Активно
+    if (t.isDeleted) return "☒";
+    if (t.isCompleted) return "✅";
+    return "☑️";
   }
 
   String _formatListForClipboard(List<Task> tasks, String headerTitle) {
@@ -373,11 +422,9 @@ class _RomanHomePageState extends State<RomanHomePage>
       final t = tasks[i];
       final emoji = _getTaskEmoji(t);
       String line;
-      // Если задача удалена или выполнена - просто эмодзи и текст
       if (t.isDeleted || t.isCompleted) {
         line = "$emoji ${t.title}";
       } else {
-        // Если активна - нумеруем
         line = "${i + 1}. $emoji ${t.title}";
       }
       buffer.writeln(line);
@@ -530,15 +577,27 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // --- ЛОГИКА ИНДЕКСОВ И СДВИГОВ ---
+  // --- ЛОГИКА ИНДЕКСОВ ---
 
   void _shiftIndicesDown(int targetIndex) {
     final allActive = _box.values
-        .where((t) => !t.isCompleted && !t.isDeleted)
+        .where((t) => !t.isCompleted && !t.isDeleted && t.parentId == null)
         .toList();
     allActive.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
-
     for (var t in allActive) {
+      if (t.sortIndex >= targetIndex) {
+        t.sortIndex += 1;
+        t.save();
+      }
+    }
+  }
+
+  void _shiftChildIndicesDown(String parentId, int targetIndex) {
+    final children = _box.values
+        .where((t) => t.parentId == parentId && !t.isDeleted)
+        .toList();
+    children.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+    for (var t in children) {
       if (t.sortIndex >= targetIndex) {
         t.sortIndex += 1;
         t.save();
@@ -550,23 +609,30 @@ class _RomanHomePageState extends State<RomanHomePage>
     final tasks = _box.values.where((t) {
       if (deleted) return t.isDeleted;
       if (completed) return t.isCompleted && !t.isDeleted;
-      return !t.isCompleted && !t.isDeleted;
+      return !t.isCompleted && !t.isDeleted && t.parentId == null;
     });
     if (tasks.isEmpty) return 0;
     return tasks.map((e) => e.sortIndex).reduce(min) - 1;
   }
 
   int _getBottomIndexForActive() {
-    final tasks = _box.values.where((t) => !t.isCompleted && !t.isDeleted);
+    final tasks = _box.values.where(
+      (t) => !t.isCompleted && !t.isDeleted && t.parentId == null,
+    );
     if (tasks.isEmpty) return 0;
     return tasks.map((e) => e.sortIndex).reduce(max) + 1;
   }
 
   int _getTargetIndexForUrgentBottom() {
     final nonUrgentTasks = _box.values
-        .where((t) => !t.isCompleted && !t.isDeleted && t.urgency != 2)
+        .where(
+          (t) =>
+              !t.isCompleted &&
+              !t.isDeleted &&
+              t.urgency != 2 &&
+              t.parentId == null,
+        )
         .toList();
-
     if (nonUrgentTasks.isNotEmpty) {
       final firstNonUrgentIndex = nonUrgentTasks
           .map((e) => e.sortIndex)
@@ -579,29 +645,76 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   int _getTargetIndexForNormalTop() {
     final urgentTasks = _box.values
-        .where((t) => !t.isCompleted && !t.isDeleted && t.urgency == 2)
+        .where(
+          (t) =>
+              !t.isCompleted &&
+              !t.isDeleted &&
+              t.urgency == 2 &&
+              t.parentId == null,
+        )
         .toList();
-
     if (urgentTasks.isNotEmpty) {
       final lastUrgentIndex = urgentTasks.map((e) => e.sortIndex).reduce(max);
       return lastUrgentIndex + 1;
     } else {
       final allActive = _box.values
-          .where((t) => !t.isCompleted && !t.isDeleted)
+          .where((t) => !t.isCompleted && !t.isDeleted && t.parentId == null)
           .toList();
       if (allActive.isEmpty) return 0;
       return allActive.map((e) => e.sortIndex).reduce(min);
     }
   }
 
+  int _getChildTopIndex(String parentId) {
+    final children = _box.values
+        .where((t) => t.parentId == parentId && !t.isDeleted)
+        .toList();
+    if (children.isEmpty) return 0;
+    return children.map((e) => e.sortIndex).reduce(min) - 1;
+  }
+
+  int _getChildBottomIndex(String parentId) {
+    final children = _box.values
+        .where((t) => t.parentId == parentId && !t.isDeleted)
+        .toList();
+    if (children.isEmpty) return 0;
+    return children.map((e) => e.sortIndex).reduce(max) + 1;
+  }
+
+  int _getChildTargetIndexForUrgentBottom(String parentId) {
+    final nonUrgent = _box.values
+        .where((t) => t.parentId == parentId && t.urgency != 2 && !t.isDeleted)
+        .toList();
+    if (nonUrgent.isNotEmpty) {
+      return nonUrgent.map((e) => e.sortIndex).reduce(min);
+    }
+    return _getChildBottomIndex(parentId);
+  }
+
+  int _getChildTargetIndexForNormalTop(String parentId) {
+    final urgent = _box.values
+        .where((t) => t.parentId == parentId && t.urgency == 2 && !t.isDeleted)
+        .toList();
+    if (urgent.isNotEmpty) {
+      return urgent.map((e) => e.sortIndex).reduce(max) + 1;
+    }
+    final all = _box.values
+        .where((t) => t.parentId == parentId && !t.isDeleted)
+        .toList();
+    if (all.isEmpty) return 0;
+    return all.map((e) => e.sortIndex).reduce(min);
+  }
+
+  // --- МЕТОДЫ УПРАВЛЕНИЯ ЗАДАЧАМИ ---
+
   void _saveNewTask(
     String title,
     int urgency,
     int importance,
     int positionMode,
+    bool isFolder,
   ) {
     int newIndex;
-
     if (urgency == 2) {
       if (positionMode == 0) {
         newIndex = _getTopIndexForState();
@@ -625,6 +738,8 @@ class _RomanHomePageState extends State<RomanHomePage>
       urgency: urgency,
       importance: importance,
       sortIndex: newIndex,
+      isFolder: isFolder,
+      parentId: null,
     );
     _box.put(newTask.id, newTask);
     setState(() {});
@@ -639,25 +754,49 @@ class _RomanHomePageState extends State<RomanHomePage>
     task.urgency = urgency;
     task.importance = importance;
 
-    int newIndex = task.sortIndex;
+    int newIndex;
 
-    if (task.urgency == 2) {
-      if (positionMode == 0) {
-        newIndex = _getTopIndexForState();
-      } else if (positionMode == 2) {
-        newIndex = _getTargetIndexForUrgentBottom();
-        _shiftIndicesDown(newIndex);
+    if (task.parentId != null) {
+      String pid = task.parentId!;
+      if (task.urgency == 2) {
+        if (positionMode == 0)
+          newIndex = _getChildTopIndex(pid);
+        else {
+          newIndex = _getChildTargetIndexForUrgentBottom(pid);
+          _shiftChildIndicesDown(pid, newIndex);
+        }
+      } else {
+        if (positionMode == 0) {
+          newIndex = _getChildTargetIndexForNormalTop(pid);
+          _shiftChildIndicesDown(pid, newIndex);
+        } else
+          newIndex = _getChildBottomIndex(pid);
       }
     } else {
-      if (positionMode == 0) {
-        newIndex = _getTargetIndexForNormalTop();
-        _shiftIndicesDown(newIndex);
-      } else if (positionMode == 2) {
-        newIndex = _getBottomIndexForActive();
+      if (task.urgency == 2) {
+        if (positionMode == 0)
+          newIndex = _getTopIndexForState();
+        else {
+          newIndex = _getTargetIndexForUrgentBottom();
+          _shiftIndicesDown(newIndex);
+        }
+      } else {
+        if (positionMode == 0) {
+          newIndex = _getTargetIndexForNormalTop();
+          _shiftIndicesDown(newIndex);
+        } else
+          newIndex = _getBottomIndexForActive();
+      }
+
+      if (positionMode != 1) {
+        task.parentId = null;
       }
     }
 
-    task.sortIndex = newIndex;
+    if (positionMode != 1) {
+      task.sortIndex = newIndex;
+    }
+
     task.save();
     setState(() {});
   }
@@ -665,9 +804,19 @@ class _RomanHomePageState extends State<RomanHomePage>
   void _completeTask(Task task) {
     task.isCompleted = true;
     task.isDeleted = false;
-    task.sortIndex = _getTopIndexForState(completed: true);
+    if (task.parentId == null) {
+      task.sortIndex = _getTopIndexForState(completed: true);
+      _highlightTaskId = task.id;
+    } else {
+      _highlightTaskId = null;
+    }
 
-    _highlightTaskId = task.id;
+    task.save();
+    setState(() {});
+  }
+
+  void _uncompleteChild(Task task) {
+    task.isCompleted = false;
     task.save();
     setState(() {});
   }
@@ -675,6 +824,7 @@ class _RomanHomePageState extends State<RomanHomePage>
   void _restoreToActive(Task task) {
     task.isCompleted = false;
     task.isDeleted = false;
+    task.parentId = null;
 
     int newIndex;
     if (task.urgency == 2) {
@@ -694,6 +844,7 @@ class _RomanHomePageState extends State<RomanHomePage>
   void _moveToTrash(Task task) {
     task.isDeleted = true;
     task.isCompleted = false;
+    task.parentId = null;
     task.sortIndex = _getTopIndexForState(deleted: true);
 
     _highlightTaskId = task.id;
@@ -702,59 +853,139 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   Future<void> _permanentlyDelete(Task task) async {
+    if (task.isFolder) {
+      final children = _box.values.where((t) => t.parentId == task.id).toList();
+      for (var child in children) {
+        await child.delete();
+      }
+    }
     await task.delete();
     setState(() {});
   }
 
-  void _onReorder(int oldIndex, int newIndex, List<Task> currentList) {
+  // --- ГЛАВНАЯ ЛОГИКА СПИСКА ---
+
+  List<Task> _buildHierarchicalList(
+    bool Function(Task) filterRoots,
+    bool Function(Task) filterChildren,
+  ) {
+    List<Task> flatList = [];
+
+    final rootTasks = _box.values.where(filterRoots).toList();
+    rootTasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+
+    for (var task in rootTasks) {
+      flatList.add(task);
+
+      if (task.isFolder && _openFolders.contains(task.id)) {
+        final children = _box.values
+            .where((t) => t.parentId == task.id && filterChildren(t))
+            .toList();
+
+        children.sort((a, b) {
+          if (a.urgency != b.urgency) return b.urgency.compareTo(a.urgency);
+          return a.sortIndex.compareTo(b.sortIndex);
+        });
+
+        flatList.addAll(children);
+
+        // Плейсхолдер ТОЛЬКО в Активном списке (Tab 1)
+        if (_currentIndex == 1) {
+          flatList.add(
+            Task(
+              id: 'placeholder_${task.id}',
+              title: '',
+              createdAt: DateTime.now(),
+              parentId: task.id,
+              isFolder: false,
+            ),
+          );
+        }
+      }
+    }
+    return flatList;
+  }
+
+  void _onReorder(int oldIndex, int newIndex) {
+    final flatList = _buildHierarchicalList(
+      (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
+      (t) => !t.isDeleted,
+    );
+
     if (oldIndex < newIndex) newIndex -= 1;
-    final Task item = currentList.removeAt(oldIndex);
-    currentList.insert(newIndex, item);
+    final Task item = flatList[oldIndex];
 
-    bool forcedChange = false;
+    if (item.id.startsWith('placeholder_')) return;
 
-    if (newIndex > 0) {
-      final Task neighborAbove = currentList[newIndex - 1];
-      if (neighborAbove.urgency != 2) {
-        if (item.urgency == 2) {
-          item.urgency = 1;
-          forcedChange = true;
+    flatList.removeAt(oldIndex);
+    flatList.insert(newIndex, item);
+
+    if (item.isFolder) {
+      item.parentId = null;
+    } else {
+      if (newIndex == 0) {
+        item.parentId = null;
+      } else {
+        final neighborAbove = flatList[newIndex - 1];
+
+        if (neighborAbove.id.startsWith('placeholder_')) {
+          item.parentId = null;
+        } else if (neighborAbove.parentId != null) {
+          item.parentId = neighborAbove.parentId;
+        } else if (neighborAbove.isFolder &&
+            _openFolders.contains(neighborAbove.id)) {
+          item.parentId = neighborAbove.id;
+        } else {
+          item.parentId = null;
         }
       }
     }
 
-    if (newIndex < currentList.length - 1) {
-      final Task neighborBelow = currentList[newIndex + 1];
-      if (neighborBelow.urgency == 2) {
-        if (item.urgency != 2) {
-          item.urgency = 2;
-          forcedChange = true;
+    // АВТО-СТАТУС
+    if (item.parentId == null) {
+      if (newIndex < flatList.length - 1) {
+        final neighborBelow = flatList[newIndex + 1];
+        if (!neighborBelow.id.startsWith('placeholder_') &&
+            neighborBelow.parentId == null) {
+          if (neighborBelow.urgency == 2 && item.urgency != 2) item.urgency = 2;
+        }
+      }
+      if (newIndex > 0) {
+        final neighborAbove = flatList[newIndex - 1];
+        if (!neighborAbove.id.startsWith('placeholder_') &&
+            neighborAbove.parentId == null) {
+          if (neighborAbove.urgency != 2 && item.urgency == 2) item.urgency = 1;
+        }
+      }
+    } else {
+      if (newIndex < flatList.length - 1) {
+        final neighborBelow = flatList[newIndex + 1];
+        if (neighborBelow.parentId == item.parentId &&
+            !neighborBelow.id.startsWith('placeholder_')) {
+          if (neighborBelow.urgency == 2 && item.urgency != 2) item.urgency = 2;
+        }
+      }
+      if (newIndex > 0) {
+        final neighborAbove = flatList[newIndex - 1];
+        if (neighborAbove.parentId == item.parentId) {
+          if (neighborAbove.urgency != 2 && item.urgency == 2) item.urgency = 1;
         }
       }
     }
 
-    for (int i = 0; i < currentList.length; i++) {
-      currentList[i].sortIndex = i;
-      currentList[i].save();
+    item.save();
+
+    Map<String?, int> counters = {};
+    for (var t in flatList) {
+      if (t.id.startsWith('placeholder_')) continue;
+      String? pid = t.parentId;
+      int currentIndex = counters[pid] ?? 0;
+      t.sortIndex = currentIndex;
+      t.save();
+      counters[pid] = currentIndex + 1;
     }
-    if (forcedChange) item.save();
+
     setState(() {});
-  }
-
-  int get _activeCount =>
-      _box.values.where((t) => !t.isDeleted && !t.isCompleted).length;
-  int get _completedCount =>
-      _box.values.where((t) => t.isCompleted && !t.isDeleted).length;
-  int get _deletedCount => _box.values.where((t) => t.isDeleted).length;
-
-  Color get _backgroundColor {
-    if (_currentIndex == 2) return const Color(0xFF121212);
-    return const Color(0xFFFFFFFF);
-  }
-
-  Color get _textColor {
-    if (_currentIndex == 2) return Colors.white;
-    return Colors.black87;
   }
 
   @override
@@ -792,9 +1023,30 @@ class _RomanHomePageState extends State<RomanHomePage>
                     ? Colors.white38
                     : Colors.black38,
                 tabs: [
-                  _buildTab(Icons.delete_outline, _deletedCount, 0),
-                  _buildTab(Icons.list_alt, _activeCount, 1),
-                  _buildTab(Icons.emoji_events_outlined, _completedCount, 2),
+                  _buildTab(
+                    Icons.delete_outline,
+                    _box.values.where((t) => t.isDeleted).length,
+                    0,
+                  ),
+                  _buildTab(
+                    Icons.list_alt,
+                    _box.values
+                        .where((t) => !t.isDeleted && !t.isCompleted)
+                        .length,
+                    1,
+                  ),
+                  _buildTab(
+                    Icons.emoji_events_outlined,
+                    _box.values
+                        .where(
+                          (t) =>
+                              t.isCompleted &&
+                              !t.isDeleted &&
+                              t.parentId == null,
+                        )
+                        .length,
+                    2,
+                  ),
                 ],
               ),
             ),
@@ -862,147 +1114,43 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  Widget _buildLeftIndicator(Task task, bool isSelected) {
-    if (isSelected) {
-      return GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: () => _toggleSelection(task.id),
-        child: Container(
-          width: 50,
-          color: Colors.transparent,
-          alignment: Alignment.center,
-          child: Container(
-            width: 30,
-            height: 30,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: Colors.black,
-              borderRadius: BorderRadius.circular(4),
-              boxShadow: const [
-                BoxShadow(
-                  color: Colors.black12,
-                  blurRadius: 2,
-                  offset: Offset(0, 1),
-                ),
-              ],
-            ),
-            child: const Icon(Icons.swap_horiz, size: 20, color: Colors.white),
-          ),
-        ),
-      );
-    }
-
-    Widget iconWidget;
-    BoxDecoration decoration;
-
-    if (task.isCompleted && !task.isDeleted) {
-      decoration = BoxDecoration(
-        color: Colors.transparent,
-        border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
-        borderRadius: BorderRadius.circular(4),
-      );
-      iconWidget = const Icon(Icons.check, color: Colors.grey, size: 18);
-    } else if (task.isDeleted) {
-      decoration = BoxDecoration(
-        color: Colors.transparent,
-        border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
-        borderRadius: BorderRadius.circular(4),
-      );
-      iconWidget = const Icon(Icons.close, color: Colors.grey, size: 18);
-    } else {
-      decoration = BoxDecoration(
-        color: Colors.transparent,
-        border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
-        borderRadius: BorderRadius.circular(4),
-      );
-      iconWidget = const SizedBox();
-    }
-
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onTap: () => _toggleSelection(task.id),
-      child: Container(
-        width: 50,
-        color: Colors.transparent,
-        alignment: Alignment.center,
-        child: Container(
-          width: 24,
-          height: 24,
-          decoration: decoration,
-          child: iconWidget,
-        ),
-      ),
-    );
+  Color get _backgroundColor {
+    if (_currentIndex == 2) return const Color(0xFF121212);
+    return const Color(0xFFFFFFFF);
   }
 
-  BoxDecoration _getTaskDecoration(Task task) {
-    if (task.isCompleted && !task.isDeleted) {
-      if (task.urgency == 2 && task.importance == 2) {
-        return _grad([
-          const Color(0xFFBF953F),
-          const Color(0xFFFCF6BA),
-          const Color(0xFFAA771C),
-        ]);
-      }
-      if (task.importance == 2) {
-        return _grad([
-          const Color(0xFFE0E0E0),
-          const Color(0xFFFFFFFF),
-          const Color(0xFFAAAAAA),
-        ]);
-      }
-      if (task.urgency == 2) {
-        return _grad([
-          const Color(0xFFCD7F32),
-          const Color(0xFFFFCC99),
-          const Color(0xFFA0522D),
-        ]);
-      }
-      return BoxDecoration(
-        color: const Color(0xFF8D6E63),
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: _shadow(),
-      );
-    }
-    if (task.isDeleted) {
-      return BoxDecoration(
-        color: Colors.grey[200],
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: _shadow(),
-      );
-    }
-    return BoxDecoration(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(8),
-      boxShadow: _shadow(),
-    );
+  Color get _textColor {
+    if (_currentIndex == 2) return Colors.white;
+    return Colors.black87;
   }
-
-  BoxDecoration _grad(List<Color> colors) {
-    return BoxDecoration(
-      gradient: LinearGradient(
-        colors: colors,
-        begin: Alignment.topLeft,
-        end: Alignment.bottomRight,
-      ),
-      borderRadius: BorderRadius.circular(8),
-      boxShadow: _shadow(),
-    );
-  }
-
-  List<BoxShadow> _shadow() => const [
-    BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 2)),
-  ];
 
   Widget _buildTaskItem(
     Task task,
     BuildContext context,
     int index, {
     bool showCup = false,
+    bool isReorderable = false,
   }) {
+    if (task.id.startsWith('placeholder_')) {
+      if (!isReorderable) return const SizedBox();
+
+      return Container(
+        key: ValueKey(task.id),
+        height: 40,
+        margin: const EdgeInsets.fromLTRB(48, 4, 16, 4),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Colors.grey.withOpacity(0.3), width: 2),
+          ),
+        ),
+        alignment: Alignment.centerLeft,
+      );
+    }
+
     final isExpanded = _expandedTaskId == task.id;
     final isSelected = _selectedTaskId == task.id;
     final shouldBlink = _highlightTaskId == task.id;
+    final isFolderOpen = _openFolders.contains(task.id);
 
     Widget content = TaskItemWidget(
       key: ValueKey(task.id),
@@ -1012,7 +1160,10 @@ class _RomanHomePageState extends State<RomanHomePage>
       isSelected: isSelected,
       showCup: showCup,
       shouldBlink: shouldBlink,
+      isFolderOpen: isFolderOpen,
+      tabIndex: _currentIndex,
       onBlinkFinished: () {
+        // Таймер отработал, снимаем подсветку
         if (_highlightTaskId == task.id) {
           _highlightTaskId = null;
         }
@@ -1020,82 +1171,88 @@ class _RomanHomePageState extends State<RomanHomePage>
       onToggleExpand: () => _toggleExpand(task.id),
       onToggleSelection: () => _toggleSelection(task.id),
       onDoubleTap: () {
-        if (!task.isDeleted && !task.isCompleted) {
+        if (!task.isDeleted || true) {
+          // Разрешено редактировать везде
           _showTaskDialog(context, task: task);
         }
       },
-      decorationBuilder: _getTaskDecoration,
-      indicatorBuilder: _buildLeftIndicator,
+      onFolderTap: () => _toggleFolder(task.id),
+      decorationBuilder: (t) => _getTaskDecoration(t, _currentIndex),
+      indicatorBuilder: (t, s) => _buildLeftIndicator(t, s, _currentIndex),
     );
+
+    // БЛОКИРОВКА СВАЙПОВ ДЛЯ ДЕТЕЙ В МУСОРКЕ И ВЫПОЛНЕННЫХ
+    bool isLockedChild = (_currentIndex != 1) && (task.parentId != null);
+    if (isLockedChild) {
+      return content; // Возвращаем контент без Dismissible
+    }
+
+    // Если не активный список (Мусорка/Выполнено) для Родителей/Корней - разрешаем Dismissible
+    // Если активный список - разрешаем Dismissible всем (и детям тоже)
+    if (!isReorderable && _currentIndex != 1 && task.parentId != null) {
+      // Доп. защита: если это список без реордера (Архивы) и это ребенок - блокируем.
+      // Но мы уже заблокировали выше.
+    }
 
     Widget background;
     Widget secondaryBackground;
 
-    if (task.isCompleted && !task.isDeleted) {
-      background = Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.only(left: 24),
-        child: const Icon(Icons.delete_outline, color: Colors.white),
+    if (task.parentId != null && !task.isDeleted) {
+      if (task.isCompleted) {
+        background = _buildSwipeBg(
+          const Color(0xFFD4AF37),
+          Icons.undo,
+          Alignment.centerLeft,
+        );
+        secondaryBackground = _buildSwipeBg(
+          const Color(0xFFD4AF37),
+          Icons.undo,
+          Alignment.centerRight,
+        );
+      } else {
+        background = _buildSwipeBg(
+          Colors.green,
+          Icons.check,
+          Alignment.centerLeft,
+        );
+        secondaryBackground = _buildSwipeBg(
+          Colors.red,
+          Icons.delete,
+          Alignment.centerRight,
+        );
+      }
+    } else if (task.isCompleted && !task.isDeleted) {
+      background = _buildSwipeBg(
+        Colors.black,
+        Icons.delete_outline,
+        Alignment.centerLeft,
       );
-
-      secondaryBackground = Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-        decoration: BoxDecoration(
-          color: const Color(0xFFD4AF37),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 24),
-        child: const Icon(Icons.list_alt, color: Colors.white),
+      secondaryBackground = _buildSwipeBg(
+        const Color(0xFFD4AF37),
+        Icons.list_alt,
+        Alignment.centerRight,
       );
     } else if (task.isDeleted) {
-      background = Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-        decoration: BoxDecoration(
-          color: const Color(0xFFD4AF37),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.only(left: 24),
-        child: const Icon(Icons.list_alt, color: Colors.white),
+      background = _buildSwipeBg(
+        const Color(0xFFD4AF37),
+        Icons.list_alt,
+        Alignment.centerLeft,
       );
-
-      secondaryBackground = Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-        decoration: BoxDecoration(
-          color: Colors.red[900],
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 24),
-        child: const Icon(Icons.delete_forever, color: Colors.white),
+      secondaryBackground = _buildSwipeBg(
+        Colors.red[900]!,
+        Icons.delete_forever,
+        Alignment.centerRight,
       );
     } else {
-      background = Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-        decoration: BoxDecoration(
-          color: const Color(0xFFD4AF37),
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.centerLeft,
-        padding: const EdgeInsets.only(left: 24),
-        child: const Icon(Icons.emoji_events, color: Colors.white),
+      background = _buildSwipeBg(
+        const Color(0xFFD4AF37),
+        Icons.emoji_events,
+        Alignment.centerLeft,
       );
-
-      secondaryBackground = Container(
-        margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
-        decoration: BoxDecoration(
-          color: Colors.black,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        alignment: Alignment.centerRight,
-        padding: const EdgeInsets.only(right: 24),
-        child: const Icon(Icons.delete_outline, color: Colors.white),
+      secondaryBackground = _buildSwipeBg(
+        Colors.black,
+        Icons.delete_outline,
+        Alignment.centerRight,
       );
     }
 
@@ -1107,14 +1264,30 @@ class _RomanHomePageState extends State<RomanHomePage>
       background: background,
       secondaryBackground: secondaryBackground,
       confirmDismiss: (direction) async {
-        if (direction == DismissDirection.startToEnd) {
-          if (task.isDeleted) {
-            _restoreToActive(task);
-          } else if (task.isCompleted) {
-            _moveToTrash(task);
+        _selectedTaskId = null;
+
+        if (task.parentId != null && !task.isDeleted) {
+          if (task.isCompleted) {
+            _uncompleteChild(task);
+            return false;
           } else {
-            _completeTask(task);
+            if (direction == DismissDirection.startToEnd) {
+              _completeTask(task);
+              return false;
+            } else {
+              _moveToTrash(task);
+              return false;
+            }
           }
+        }
+
+        if (direction == DismissDirection.startToEnd) {
+          if (task.isDeleted)
+            _restoreToActive(task);
+          else if (task.isCompleted)
+            _moveToTrash(task);
+          else
+            _completeTask(task);
         } else {
           if (task.isDeleted) {
             return await showDialog(
@@ -1149,71 +1322,96 @@ class _RomanHomePageState extends State<RomanHomePage>
             _moveToTrash(task);
           }
         }
-        _selectedTaskId = null;
         return false;
       },
       child: content,
     );
   }
 
+  Widget _buildSwipeBg(Color color, IconData icon, Alignment align) {
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      alignment: align,
+      padding: const EdgeInsets.symmetric(horizontal: 24),
+      child: Icon(icon, color: Colors.white),
+    );
+  }
+
   Widget _buildActiveTasksList() {
-    final tasks = _box.values
-        .where((t) => !t.isDeleted && !t.isCompleted)
-        .toList();
-    tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+    final flatList = _buildHierarchicalList(
+      (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
+      (t) => !t.isDeleted,
+    );
 
     return ReorderableListView.builder(
       physics: const BouncingScrollPhysics(
         parent: AlwaysScrollableScrollPhysics(),
       ),
       padding: const EdgeInsets.fromLTRB(0, 10, 0, 80),
-      itemCount: tasks.length,
-      onReorder: (oldIndex, newIndex) => _onReorder(oldIndex, newIndex, tasks),
+      itemCount: flatList.length,
+      onReorder: _onReorder,
       proxyDecorator: (child, index, animation) =>
           Material(elevation: 5, color: Colors.transparent, child: child),
       itemBuilder: (context, index) {
-        final task = tasks[index];
+        final task = flatList[index];
         return Container(
           key: Key(task.id),
-          child: _buildTaskItem(task, context, index),
+          child: _buildTaskItem(task, context, index, isReorderable: true),
         );
       },
     );
   }
 
   Widget _buildCompletedTasksList() {
-    final tasks = _box.values
-        .where((t) => t.isCompleted && !t.isDeleted)
-        .toList();
-    tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
-    return ListView.builder(
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      itemCount: tasks.length,
-      itemBuilder: (context, index) =>
-          _buildTaskItem(tasks[index], context, index, showCup: true),
+    return _buildReadOnlyList(
+      (t) => t.isCompleted && !t.isDeleted && t.parentId == null,
+      (t) => t.parentId != null,
     );
   }
 
   Widget _buildDeletedTasksList() {
-    final tasks = _box.values.where((t) => t.isDeleted).toList();
-    tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
-
-    return ListView(
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      children: tasks.asMap().entries.map((entry) {
-        return _buildTaskItem(entry.value, context, entry.key);
-      }).toList(),
+    return _buildReadOnlyList(
+      (t) => t.isDeleted && t.parentId == null,
+      (t) => t.parentId != null,
     );
   }
 
+  Widget _buildReadOnlyList(
+    bool Function(Task) rootFilter,
+    bool Function(Task) childFilter,
+  ) {
+    final flatList = _buildHierarchicalList(rootFilter, childFilter);
+    return ListView.builder(
+      physics: const BouncingScrollPhysics(),
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      itemCount: flatList.length,
+      itemBuilder: (context, index) {
+        bool showCup = (_currentIndex == 2);
+        if (_currentIndex == 0) showCup = false;
+        if (flatList[index].isFolder) showCup = false;
+
+        return _buildTaskItem(
+          flatList[index],
+          context,
+          index,
+          showCup: showCup,
+          isReorderable: false,
+        );
+      },
+    );
+  }
+
+  // ... (ДИАЛОГ и ХЕЛПЕРЫ без изменений) ...
   void _showTaskDialog(BuildContext context, {Task? task}) {
     final titleController = TextEditingController(text: task?.title ?? '');
     int urgency = task?.urgency ?? 1;
     int importance = task?.importance ?? 1;
     int positionMode = task == null ? 2 : 1;
-
+    bool isFolder = task?.isFolder ?? false;
     bool attentionTop = false;
     int blinkStage = 0;
     Timer? attentionTimer;
@@ -1223,7 +1421,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       barrierDismissible: false,
       builder: (ctx) {
         final double dialogHeight = MediaQuery.of(context).size.height * 0.72;
-
         return StatefulBuilder(
           builder: (context, setDialogState) {
             void selectPosition(int mode) {
@@ -1261,101 +1458,6 @@ class _RomanHomePageState extends State<RomanHomePage>
               );
             }
 
-            Widget buildStateButton({
-              required IconData icon,
-              required String label,
-              required bool isActive,
-              required Color activeColor,
-              required VoidCallback onTap,
-            }) {
-              return GestureDetector(
-                onTap: () {
-                  HapticFeedback.lightImpact();
-                  onTap();
-                },
-                child: Column(
-                  children: [
-                    AnimatedContainer(
-                      duration: const Duration(milliseconds: 200),
-                      width: 45,
-                      height: 45,
-                      decoration: BoxDecoration(
-                        color: Colors.transparent,
-                        shape: BoxShape.circle,
-                        border: Border.all(
-                          color: isActive
-                              ? activeColor
-                              : Colors.grey.withOpacity(0.3),
-                          width: 2,
-                        ),
-                      ),
-                      child: Icon(
-                        icon,
-                        color: isActive
-                            ? activeColor
-                            : Colors.grey.withOpacity(0.3),
-                        size: 26,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      label,
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: isActive ? activeColor : Colors.grey,
-                        fontWeight: isActive
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
-
-            Widget buildPosButton(int mode, IconData icon) {
-              bool isSel = positionMode == mode;
-              bool isBlinking = (mode == 0 && attentionTop);
-              Color borderColor;
-              Color iconColor;
-              Color bgColor;
-
-              if (isBlinking) {
-                if (blinkStage == 1) {
-                  borderColor = Colors.red;
-                  iconColor = Colors.red;
-                  bgColor = Colors.red.withOpacity(0.1);
-                } else {
-                  borderColor = Colors.blue;
-                  iconColor = Colors.blue;
-                  bgColor = Colors.blue.withOpacity(0.1);
-                }
-              } else if (isSel) {
-                borderColor = Colors.blue;
-                iconColor = Colors.blue;
-                bgColor = Colors.blue.withOpacity(0.1);
-              } else {
-                borderColor = Colors.grey.withOpacity(0.3);
-                iconColor = Colors.grey.withOpacity(0.3);
-                bgColor = Colors.transparent;
-              }
-
-              return GestureDetector(
-                onTap: () => selectPosition(mode),
-                child: Container(
-                  margin: const EdgeInsets.symmetric(vertical: 2),
-                  width: 45,
-                  height: 38,
-                  decoration: BoxDecoration(
-                    border: Border.all(color: borderColor, width: 2),
-                    borderRadius: BorderRadius.circular(8),
-                    color: bgColor,
-                  ),
-                  child: Icon(icon, size: 24, color: iconColor),
-                ),
-              );
-            }
-
             void save() {
               if (titleController.text.trim().isNotEmpty) {
                 attentionTimer?.cancel();
@@ -1365,9 +1467,11 @@ class _RomanHomePageState extends State<RomanHomePage>
                     urgency,
                     importance,
                     positionMode,
+                    isFolder,
                   );
                 } else {
                   task.title = titleController.text;
+                  task.isFolder = isFolder;
                   _updateTaskAndMove(task, urgency, importance, positionMode);
                 }
                 Navigator.pop(ctx);
@@ -1401,7 +1505,6 @@ class _RomanHomePageState extends State<RomanHomePage>
                           ),
                           padding: const EdgeInsets.symmetric(horizontal: 8),
                           child: Scrollbar(
-                            thumbVisibility: true,
                             child: TextField(
                               controller: titleController,
                               autofocus: true,
@@ -1416,57 +1519,23 @@ class _RomanHomePageState extends State<RomanHomePage>
                               maxLines: null,
                               expands: true,
                               textAlignVertical: TextAlignVertical.top,
-                              contextMenuBuilder: (context, editableTextState) {
-                                return TextSelectionToolbar(
-                                  anchorAbove: editableTextState
-                                      .contextMenuAnchors
-                                      .primaryAnchor,
-                                  anchorBelow: editableTextState
-                                      .contextMenuAnchors
-                                      .primaryAnchor,
-                                  children: [
-                                    IconButton(
-                                      onPressed: () =>
-                                          editableTextState.selectAll(
-                                            SelectionChangedCause.toolbar,
-                                          ),
-                                      icon: const Icon(Icons.select_all),
-                                      tooltip: "Выделить всё",
-                                    ),
-                                    IconButton(
-                                      onPressed: () =>
-                                          editableTextState.cutSelection(
-                                            SelectionChangedCause.toolbar,
-                                          ),
-                                      icon: const Icon(Icons.content_cut),
-                                      tooltip: "Вырезать",
-                                    ),
-                                    IconButton(
-                                      onPressed: () =>
-                                          editableTextState.copySelection(
-                                            SelectionChangedCause.toolbar,
-                                          ),
-                                      icon: const Icon(Icons.copy),
-                                      tooltip: "Копировать",
-                                    ),
-                                    IconButton(
-                                      onPressed: () =>
-                                          editableTextState.pasteText(
-                                            SelectionChangedCause.toolbar,
-                                          ),
-                                      icon: const Icon(Icons.paste),
-                                      tooltip: "Вставить",
-                                    ),
-                                  ],
-                                );
-                              },
                             ),
                           ),
                         ),
                       ),
-
-                      const SizedBox(height: 16),
-
+                      if (task == null || task.parentId == null)
+                        Row(
+                          children: [
+                            Checkbox(
+                              value: isFolder,
+                              activeColor: Colors.black,
+                              onChanged: (val) =>
+                                  setDialogState(() => isFolder = val!),
+                            ),
+                            const Text("Это папка"),
+                          ],
+                        ),
+                      const SizedBox(height: 8),
                       SizedBox(
                         height: 170,
                         child: Row(
@@ -1479,12 +1548,12 @@ class _RomanHomePageState extends State<RomanHomePage>
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
-                                      buildStateButton(
-                                        icon: Icons.bolt,
-                                        label: "Срочно",
-                                        isActive: urgency == 2,
-                                        activeColor: Colors.red,
-                                        onTap: () {
+                                      _buildDialogStateButton(
+                                        Icons.bolt,
+                                        "Срочно",
+                                        urgency == 2,
+                                        Colors.red,
+                                        () {
                                           setDialogState(() {
                                             urgency = (urgency == 1 ? 2 : 1);
                                             if (urgency == 2)
@@ -1493,12 +1562,12 @@ class _RomanHomePageState extends State<RomanHomePage>
                                         },
                                       ),
                                       const SizedBox(width: 20),
-                                      buildStateButton(
-                                        icon: Icons.priority_high,
-                                        label: "Важно",
-                                        isActive: importance == 2,
-                                        activeColor: Colors.orange,
-                                        onTap: () {
+                                      _buildDialogStateButton(
+                                        Icons.priority_high,
+                                        "Важно",
+                                        importance == 2,
+                                        Colors.orange,
+                                        () {
                                           setDialogState(() {
                                             importance = (importance == 1
                                                 ? 2
@@ -1510,9 +1579,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                                       ),
                                     ],
                                   ),
-
                                   const SizedBox(height: 10),
-
                                   Row(
                                     mainAxisAlignment:
                                         MainAxisAlignment.spaceEvenly,
@@ -1557,17 +1624,36 @@ class _RomanHomePageState extends State<RomanHomePage>
                                 ],
                               ),
                             ),
-
                             const SizedBox(width: 10),
-
                             SizedBox(
                               width: 50,
                               child: Column(
                                 mainAxisAlignment: MainAxisAlignment.end,
                                 children: [
-                                  buildPosButton(0, Icons.keyboard_arrow_up),
-                                  buildPosButton(1, Icons.stop),
-                                  buildPosButton(2, Icons.keyboard_arrow_down),
+                                  _buildDialogPosButton(
+                                    0,
+                                    Icons.keyboard_arrow_up,
+                                    positionMode,
+                                    attentionTop,
+                                    blinkStage,
+                                    () => selectPosition(0),
+                                  ),
+                                  _buildDialogPosButton(
+                                    1,
+                                    Icons.stop,
+                                    positionMode,
+                                    attentionTop,
+                                    blinkStage,
+                                    () => selectPosition(1),
+                                  ),
+                                  _buildDialogPosButton(
+                                    2,
+                                    Icons.keyboard_arrow_down,
+                                    positionMode,
+                                    attentionTop,
+                                    blinkStage,
+                                    () => selectPosition(2),
+                                  ),
                                   const SizedBox(height: 4),
                                   const Text(
                                     "Позиция",
@@ -1591,6 +1677,100 @@ class _RomanHomePageState extends State<RomanHomePage>
           },
         );
       },
+    );
+  }
+
+  Widget _buildDialogStateButton(
+    IconData icon,
+    String label,
+    bool isActive,
+    Color activeColor,
+    VoidCallback onTap,
+  ) {
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.lightImpact();
+        onTap();
+      },
+      child: Column(
+        children: [
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 200),
+            width: 45,
+            height: 45,
+            decoration: BoxDecoration(
+              color: Colors.transparent,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: isActive ? activeColor : Colors.grey.withOpacity(0.3),
+                width: 2,
+              ),
+            ),
+            child: Icon(
+              icon,
+              color: isActive ? activeColor : Colors.grey.withOpacity(0.3),
+              size: 26,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10,
+              color: isActive ? activeColor : Colors.grey,
+              fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDialogPosButton(
+    int mode,
+    IconData icon,
+    int currentMode,
+    bool attention,
+    int blinkStage,
+    VoidCallback onTap,
+  ) {
+    bool isSel = currentMode == mode;
+    bool isBlinking = (mode == 0 && attention);
+    Color borderColor;
+    Color iconColor;
+    Color bgColor;
+    if (isBlinking) {
+      if (blinkStage == 1) {
+        borderColor = Colors.red;
+        iconColor = Colors.red;
+        bgColor = Colors.red.withOpacity(0.1);
+      } else {
+        borderColor = Colors.blue;
+        iconColor = Colors.blue;
+        bgColor = Colors.blue.withOpacity(0.1);
+      }
+    } else if (isSel) {
+      borderColor = Colors.blue;
+      iconColor = Colors.blue;
+      bgColor = Colors.blue.withOpacity(0.1);
+    } else {
+      borderColor = Colors.grey.withOpacity(0.3);
+      iconColor = Colors.grey.withOpacity(0.3);
+      bgColor = Colors.transparent;
+    }
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 2),
+        width: 45,
+        height: 38,
+        decoration: BoxDecoration(
+          border: Border.all(color: borderColor, width: 2),
+          borderRadius: BorderRadius.circular(8),
+          color: bgColor,
+        ),
+        child: Icon(icon, size: 24, color: iconColor),
+      ),
     );
   }
 
@@ -1628,9 +1808,202 @@ class _RomanHomePageState extends State<RomanHomePage>
       ],
     );
   }
+
+  // --- ЦВЕТА ЗАДАЧ (ЛОГИКА) ---
+  BoxDecoration _getTaskDecoration(Task task, int tabIndex) {
+    if (tabIndex == 0) {
+      return BoxDecoration(
+        color: Colors.grey[200],
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: _shadow(),
+      );
+    }
+
+    if (tabIndex == 1) {
+      return BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: _shadow(),
+      );
+    }
+
+    // Вкладка 2 (Триумфы): Золото для всех задач (включая детей)
+    if (tabIndex == 2) {
+      if (task.urgency == 2 && task.importance == 2)
+        return _grad([
+          const Color(0xFFBF953F),
+          const Color(0xFFFCF6BA),
+          const Color(0xFFAA771C),
+        ]);
+      if (task.importance == 2)
+        return _grad([
+          const Color(0xFFE0E0E0),
+          const Color(0xFFFFFFFF),
+          const Color(0xFFAAAAAA),
+        ]);
+      if (task.urgency == 2)
+        return _grad([
+          const Color(0xFFCD7F32),
+          const Color(0xFFFFCC99),
+          const Color(0xFFA0522D),
+        ]);
+      return BoxDecoration(
+        color: const Color(0xFF8D6E63),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: _shadow(),
+      );
+    }
+
+    return BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      boxShadow: _shadow(),
+    );
+  }
+
+  BoxDecoration _grad(List<Color> colors) => BoxDecoration(
+    gradient: LinearGradient(
+      colors: colors,
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+    ),
+    borderRadius: BorderRadius.circular(8),
+    boxShadow: _shadow(),
+  );
+  List<BoxShadow> _shadow() => const [
+    BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 2)),
+  ];
+
+  // --- ИКОНКА ПАПКИ И ЧЕКБОКСЫ (СТРОГО ПО ТЗ) ---
+  Widget _buildLeftIndicator(Task task, bool isSelected, int tabIndex) {
+    if (isSelected) {
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => _toggleSelection(task.id),
+        child: Container(
+          width: 50,
+          color: Colors.transparent,
+          alignment: Alignment.center,
+          child: Container(
+            width: 30,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: Colors.black,
+              borderRadius: BorderRadius.circular(4),
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black12,
+                  blurRadius: 2,
+                  offset: Offset(0, 1),
+                ),
+              ],
+            ),
+            child: const Icon(Icons.swap_horiz, size: 20, color: Colors.white),
+          ),
+        ),
+      );
+    }
+    Widget iconWidget;
+
+    // ПАПКА В АКТИВНОМ СПИСКЕ (Tab 1) - Специальная иконка
+    if (task.isFolder && tabIndex == 1) {
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => _toggleSelection(task.id),
+        child: Container(
+          width: 50,
+          alignment: Alignment.center,
+          child: SizedBox(
+            width: 24,
+            height: 24,
+            child: Stack(
+              children: [
+                Container(
+                  decoration: BoxDecoration(
+                    border: Border.all(
+                      color: Colors.grey.withOpacity(0.5),
+                      width: 2,
+                    ),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+                Positioned(
+                  top: 0,
+                  left: 0,
+                  child: Container(
+                    width: 10,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.withOpacity(0.5),
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(3),
+                        bottomRight: Radius.circular(3),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+    }
+    // ПАПКА В ДРУГИХ СПИСКАХ ИЛИ ЗАДАЧА - Обычные чекбоксы
+    else {
+      IconData? icon;
+      // В корзине (Tab 0) всегда крестик
+      if (tabIndex == 0) {
+        icon = Icons.close;
+      }
+      // В Триумфах (Tab 2) всегда галочка
+      else if (tabIndex == 2) {
+        icon = Icons.check;
+      }
+      // В активном списке (Tab 1) зависит от статуса
+      else {
+        if (task.isCompleted)
+          icon = Icons.check;
+        else
+          icon = null;
+      }
+
+      if (icon != null) {
+        iconWidget = Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Icon(icon, color: Colors.grey, size: 18),
+        );
+      } else {
+        iconWidget = Container(
+          width: 24,
+          height: 24,
+          decoration: BoxDecoration(
+            color: Colors.transparent,
+            border: Border.all(color: Colors.grey.withOpacity(0.5), width: 2),
+            borderRadius: BorderRadius.circular(4),
+          ),
+        );
+      }
+    }
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () => _toggleSelection(task.id),
+      child: Container(
+        width: 50,
+        color: Colors.transparent,
+        alignment: Alignment.center,
+        child: iconWidget,
+      ),
+    );
+  }
 }
 
-// --- ОТДЕЛЬНЫЙ ВИДЖЕТ ЗАДАЧИ ДЛЯ АНИМАЦИИ ---
 class TaskItemWidget extends StatefulWidget {
   final Task task;
   final int index;
@@ -1638,10 +2011,13 @@ class TaskItemWidget extends StatefulWidget {
   final bool isSelected;
   final bool showCup;
   final bool shouldBlink;
+  final bool isFolderOpen;
+  final int tabIndex;
   final VoidCallback onBlinkFinished;
   final VoidCallback onToggleExpand;
   final VoidCallback onToggleSelection;
   final VoidCallback onDoubleTap;
+  final VoidCallback onFolderTap;
   final BoxDecoration Function(Task) decorationBuilder;
   final Widget Function(Task, bool) indicatorBuilder;
 
@@ -1653,10 +2029,13 @@ class TaskItemWidget extends StatefulWidget {
     required this.isSelected,
     this.showCup = false,
     this.shouldBlink = false,
+    this.isFolderOpen = false,
+    required this.tabIndex,
     required this.onBlinkFinished,
     required this.onToggleExpand,
     required this.onToggleSelection,
     required this.onDoubleTap,
+    required this.onFolderTap,
     required this.decorationBuilder,
     required this.indicatorBuilder,
   }) : super(key: key);
@@ -1673,16 +2052,25 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
   @override
   void initState() {
     super.initState();
+    // Мигание запускаем тут, если виджет создается и должен мигать
+    if (widget.shouldBlink) {
+      _startBlinking();
+    }
+  }
+
+  @override
+  void didUpdateWidget(TaskItemWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.shouldBlink && !oldWidget.shouldBlink) {
+      _startBlinking();
+    }
   }
 
   void _startBlinking() {
     if (_blinkTimer != null || _hasBlinked) return;
     _hasBlinked = true;
-
     int count = 0;
     _isHighlighed = true;
-
-    // УСКОРЕНО В 3 РАЗА (100 мс)
     _blinkTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
       if (!mounted) {
         timer.cancel();
@@ -1692,7 +2080,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
         _isHighlighed = !_isHighlighed;
       });
       count++;
-      // 5 раз моргнуть = 10 переключений
       if (count >= 10) {
         timer.cancel();
         setState(() {
@@ -1713,40 +2100,64 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
   Widget build(BuildContext context) {
     Color textColor = Colors.black87;
     FontWeight fontWeight = FontWeight.normal;
+    TextDecoration textDecoration = TextDecoration.none;
 
-    if (widget.task.isCompleted && !widget.task.isDeleted) {
+    // ЦВЕТ ТЕКСТА
+    if (widget.tabIndex == 0) {
+      textColor = Colors.grey;
+      textDecoration = TextDecoration.lineThrough;
+    } else if (widget.tabIndex == 2) {
       if (widget.task.urgency == 1 && widget.task.importance == 1)
         textColor = Colors.white;
       if (widget.task.importance == 2) fontWeight = FontWeight.bold;
-    } else if (widget.task.isDeleted) {
-      textColor = Colors.grey;
     } else {
-      if (widget.task.urgency == 2) textColor = const Color(0xFFD32F2F);
-      if (widget.task.importance == 2) fontWeight = FontWeight.bold;
+      if (widget.task.isCompleted) {
+        textColor = Colors.grey;
+      } else {
+        if (widget.task.urgency == 2) textColor = const Color(0xFFD32F2F);
+        if (widget.task.importance == 2) fontWeight = FontWeight.bold;
+      }
     }
 
     BoxDecoration decoration = widget.decorationBuilder(widget.task);
 
-    // Определяем цвет границы: Красный если активна подсветка, Прозрачный если нет.
-    // Важно: ширина (width: 3) должна быть всегда, чтобы блок не менял размер.
-    Color borderColor = Colors.transparent;
-
-    if (_isHighlighed ||
-        (widget.shouldBlink && _blinkTimer == null && mounted)) {
-      borderColor = Colors.red;
+    if (widget.task.isFolder &&
+        !widget.task.isDeleted &&
+        !widget.task.isCompleted) {
+      decoration = decoration.copyWith(
+        boxShadow: [
+          const BoxShadow(
+            color: Colors.black12,
+            offset: Offset(3, 3),
+            blurRadius: 0,
+          ),
+          ...decoration.boxShadow ?? [],
+        ],
+      );
     }
 
+    Color borderColor = Colors.transparent;
+    if (_isHighlighed) {
+      borderColor = Colors.red;
+    }
     decoration = decoration.copyWith(
       border: Border.all(color: borderColor, width: 3),
     );
 
-    // ВЕРСТКА ВРУЧНУЮ ЧЕРЕЗ ROW ВМЕСТО LISTTILE (ДЛЯ СВАЙПА)
-    Widget content = Container(
-      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
+    EdgeInsets margin = const EdgeInsets.symmetric(vertical: 4, horizontal: 16);
+    if (widget.task.parentId != null) {
+      margin = const EdgeInsets.fromLTRB(48, 4, 16, 4);
+    }
+
+    VoidCallback onTap = widget.task.isFolder
+        ? widget.onFolderTap
+        : widget.onToggleExpand;
+
+    return Container(
+      margin: margin,
       decoration: decoration,
-      // Используем InkWell для обработки тапов по всей площади
       child: InkWell(
-        onTap: widget.onToggleExpand,
+        onTap: onTap,
         onDoubleTap: widget.onDoubleTap,
         borderRadius: BorderRadius.circular(8),
         child: Padding(
@@ -1754,13 +2165,10 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              // 1. ИНДИКАТОР (слева)
               Padding(
                 padding: const EdgeInsets.only(right: 12),
                 child: widget.indicatorBuilder(widget.task, widget.isSelected),
               ),
-
-              // 2. ТЕКСТ (Занимает все доступное место)
               Expanded(
                 child: Text(
                   widget.task.title,
@@ -1771,15 +2179,11 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
                     color: textColor,
                     height: 1.2,
                     fontWeight: fontWeight,
-                    decoration: widget.task.isDeleted
-                        ? TextDecoration.lineThrough
-                        : TextDecoration.none,
+                    decoration: textDecoration,
                     decorationColor: Colors.grey,
                   ),
                 ),
               ),
-
-              // 3. КУБОК (если есть, справа)
               if (widget.showCup) ...[
                 const SizedBox(width: 8),
                 const Icon(Icons.emoji_events, color: Colors.white, size: 28),
@@ -1788,17 +2192,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
           ),
         ),
       ),
-    );
-
-    return VisibilityDetector(
-      key: Key('vis_${widget.task.id}'),
-      onVisibilityChanged: (info) {
-        // Моргаем только если видим элемент больше чем на 50%
-        if (widget.shouldBlink && info.visibleFraction > 0.5) {
-          _startBlinking();
-        }
-      },
-      child: content,
     );
   }
 }
