@@ -358,12 +358,9 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   String _getTaskEmoji(Task t) {
-    if (t.isDeleted) return "❌";
-    if (t.isCompleted) return "✅";
-    if (t.urgency == 2 && t.importance == 2) return "⚡❗";
-    if (t.urgency == 2) return "⚡";
-    if (t.importance == 2) return "❗";
-    return "▫️";
+    if (t.isDeleted) return "☒"; // Удалено
+    if (t.isCompleted) return "✅"; // Выполнено
+    return "☑️"; // Активно
   }
 
   String _formatListForClipboard(List<Task> tasks, String headerTitle) {
@@ -376,9 +373,11 @@ class _RomanHomePageState extends State<RomanHomePage>
       final t = tasks[i];
       final emoji = _getTaskEmoji(t);
       String line;
+      // Если задача удалена или выполнена - просто эмодзи и текст
       if (t.isDeleted || t.isCompleted) {
         line = "$emoji ${t.title}";
       } else {
+        // Если активна - нумеруем
         line = "${i + 1}. $emoji ${t.title}";
       }
       buffer.writeln(line);
@@ -995,7 +994,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 2)),
   ];
 
-  // --- СБОРКА ЭЛЕМЕНТА СПИСКА (СВАЙПЫ И ИКОНКИ) ---
   Widget _buildTaskItem(
     Task task,
     BuildContext context,
@@ -1030,17 +1028,14 @@ class _RomanHomePageState extends State<RomanHomePage>
       indicatorBuilder: _buildLeftIndicator,
     );
 
-    // ОПРЕДЕЛЕНИЕ ИКОНОК И ЦВЕТОВ ФОНА ДЛЯ СВАЙПА
     Widget background;
     Widget secondaryBackground;
 
     if (task.isCompleted && !task.isDeleted) {
-      // --- ВКЛАДКА ВЫПОЛНЕНО ---
-      // Свайп ВПРАВО (StartToEnd) -> В МУСОРКУ
       background = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
-          color: Colors.black, // Черный (Мусорка)
+          color: Colors.black,
           borderRadius: BorderRadius.circular(8),
         ),
         alignment: Alignment.centerLeft,
@@ -1048,11 +1043,10 @@ class _RomanHomePageState extends State<RomanHomePage>
         child: const Icon(Icons.delete_outline, color: Colors.white),
       );
 
-      // Свайп ВЛЕВО (EndToStart) -> ВОССТАНОВИТЬ (Список)
       secondaryBackground = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
-          color: const Color(0xFFD4AF37), // Золотой (Список/Актив)
+          color: const Color(0xFFD4AF37),
           borderRadius: BorderRadius.circular(8),
         ),
         alignment: Alignment.centerRight,
@@ -1060,12 +1054,10 @@ class _RomanHomePageState extends State<RomanHomePage>
         child: const Icon(Icons.list_alt, color: Colors.white),
       );
     } else if (task.isDeleted) {
-      // --- ВКЛАДКА МУСОРКА ---
-      // Свайп ВПРАВО (StartToEnd) -> ВОССТАНОВИТЬ (Список)
       background = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
-          color: const Color(0xFFD4AF37), // Золотой (Список)
+          color: const Color(0xFFD4AF37),
           borderRadius: BorderRadius.circular(8),
         ),
         alignment: Alignment.centerLeft,
@@ -1073,11 +1065,10 @@ class _RomanHomePageState extends State<RomanHomePage>
         child: const Icon(Icons.list_alt, color: Colors.white),
       );
 
-      // Свайп ВЛЕВО (EndToStart) -> УДАЛИТЬ НАВСЕГДА
       secondaryBackground = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
-          color: Colors.red[900], // Темно-красный (Удаление)
+          color: Colors.red[900],
           borderRadius: BorderRadius.circular(8),
         ),
         alignment: Alignment.centerRight,
@@ -1085,8 +1076,6 @@ class _RomanHomePageState extends State<RomanHomePage>
         child: const Icon(Icons.delete_forever, color: Colors.white),
       );
     } else {
-      // --- ВКЛАДКА АКТИВНЫЕ (по умолчанию) ---
-      // Свайп ВПРАВО -> ВЫПОЛНИТЬ (Кубок)
       background = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
@@ -1098,7 +1087,6 @@ class _RomanHomePageState extends State<RomanHomePage>
         child: const Icon(Icons.emoji_events, color: Colors.white),
       );
 
-      // Свайп ВЛЕВО -> УДАЛИТЬ (Мусорка)
       secondaryBackground = Container(
         margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
         decoration: BoxDecoration(
@@ -1120,18 +1108,15 @@ class _RomanHomePageState extends State<RomanHomePage>
       secondaryBackground: secondaryBackground,
       confirmDismiss: (direction) async {
         if (direction == DismissDirection.startToEnd) {
-          // --- СВАЙП ВПРАВО ---
           if (task.isDeleted) {
-            _restoreToActive(task); // Из мусорки -> в актив
+            _restoreToActive(task);
           } else if (task.isCompleted) {
-            _moveToTrash(task); // Из выполненных -> в мусорку
+            _moveToTrash(task);
           } else {
-            _completeTask(task); // Из активных -> в выполнено
+            _completeTask(task);
           }
         } else {
-          // --- СВАЙП ВЛЕВО ---
           if (task.isDeleted) {
-            // Из мусорки -> Удалить навсегда
             return await showDialog(
               context: context,
               builder: (ctx) => AlertDialog(
@@ -1159,9 +1144,9 @@ class _RomanHomePageState extends State<RomanHomePage>
               ),
             );
           } else if (task.isCompleted) {
-            _restoreToActive(task); // Из выполненных -> в актив
+            _restoreToActive(task);
           } else {
-            _moveToTrash(task); // Из активных -> в мусорку
+            _moveToTrash(task);
           }
         }
         _selectedTaskId = null;
@@ -1742,15 +1727,24 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
 
     BoxDecoration decoration = widget.decorationBuilder(widget.task);
 
-    if (_isHighlighed) {
-      decoration = decoration.copyWith(
-        border: Border.all(color: Colors.red, width: 3),
-      );
+    // Определяем цвет границы: Красный если активна подсветка, Прозрачный если нет.
+    // Важно: ширина (width: 3) должна быть всегда, чтобы блок не менял размер.
+    Color borderColor = Colors.transparent;
+
+    if (_isHighlighed ||
+        (widget.shouldBlink && _blinkTimer == null && mounted)) {
+      borderColor = Colors.red;
     }
 
+    decoration = decoration.copyWith(
+      border: Border.all(color: borderColor, width: 3),
+    );
+
+    // ВЕРСТКА ВРУЧНУЮ ЧЕРЕЗ ROW ВМЕСТО LISTTILE (ДЛЯ СВАЙПА)
     Widget content = Container(
       margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 16),
       decoration: decoration,
+      // Используем InkWell для обработки тапов по всей площади
       child: InkWell(
         onTap: widget.onToggleExpand,
         onDoubleTap: widget.onDoubleTap,
@@ -1760,10 +1754,13 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
+              // 1. ИНДИКАТОР (слева)
               Padding(
                 padding: const EdgeInsets.only(right: 12),
                 child: widget.indicatorBuilder(widget.task, widget.isSelected),
               ),
+
+              // 2. ТЕКСТ (Занимает все доступное место)
               Expanded(
                 child: Text(
                   widget.task.title,
@@ -1781,6 +1778,8 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
                   ),
                 ),
               ),
+
+              // 3. КУБОК (если есть, справа)
               if (widget.showCup) ...[
                 const SizedBox(width: 8),
                 const Icon(Icons.emoji_events, color: Colors.white, size: 28),
@@ -1794,6 +1793,7 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
     return VisibilityDetector(
       key: Key('vis_${widget.task.id}'),
       onVisibilityChanged: (info) {
+        // Моргаем только если видим элемент больше чем на 50%
         if (widget.shouldBlink && info.visibleFraction > 0.5) {
           _startBlinking();
         }
