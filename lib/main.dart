@@ -340,17 +340,29 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _performUpdate() {
+    // Показываем пользователю, что процесс пошел
+    _showSnackBar("Запуск RuStore...");
+
     RustoreUpdateClient.download()
         .then((value) {
           debugPrint("Загрузка обновления завершена кодом: $value");
+
+          // -1 обычно означает RESULT_OK в Android.
+          // Если вернулось что-то другое (например 0 - отмена),
+          // пробуем открыть ссылку вручную.
+          if (value != -1) {
+            _launchStoreUrl();
+          }
         })
         .catchError((e) {
           debugPrint("Ошибка нативной загрузки: $e");
-          final uri = Uri.parse(
-            "https://apps.rustore.ru/app/ru.gorelovra.tdlroman",
-          );
-          launchUrl(uri, mode: LaunchMode.externalApplication);
+          _launchStoreUrl();
         });
+  }
+
+  void _launchStoreUrl() {
+    final uri = Uri.parse("https://apps.rustore.ru/app/ru.gorelovra.tdlroman");
+    launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
   @override
@@ -1209,15 +1221,15 @@ class _RomanHomePageState extends State<RomanHomePage>
       onToggleSelection: () => _toggleSelection(task.id),
       onDoubleTap: () {
         if (_currentIndex == 1) {
-          // В активном списке: Папка открывается, Задача редактируется
-          if (task.isFolder)
-            _toggleFolder(task.id);
-          else if (!task.isDeleted && !task.isCompleted)
+          // В активном списке: ВСЕГДА открываем диалог (и для задач, и для папок)
+          if (!task.isDeleted && !task.isCompleted) {
             _showTaskDialog(context, task: task);
+          }
         } else {
-          // В Мусорке/Выполнено: БЛОКИРУЕМ редактирование
-          if (task.isFolder) _toggleFolder(task.id);
-          // Иначе ничего не делаем
+          // В Мусорке/Выполнено: Только открываем/закрываем папку
+          if (task.isFolder) {
+            _toggleFolder(task.id);
+          }
         }
       },
       onFolderTap: () => _toggleFolder(task.id),
