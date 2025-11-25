@@ -34,7 +34,7 @@ void main() async {
   runApp(const TdlRomanApp());
 }
 
-// --- МОДЕЛЬ ДАННЫХ ---
+// --- HIVE MODEL ---
 class Task extends HiveObject {
   String id;
   String title;
@@ -130,6 +130,7 @@ class TaskAdapter extends TypeAdapter<Task> {
   }
 }
 
+// --- APP WIDGET ---
 class TdlRomanApp extends StatelessWidget {
   const TdlRomanApp({super.key});
 
@@ -156,6 +157,7 @@ class TdlRomanApp extends StatelessWidget {
   }
 }
 
+// --- SPLASH SCREEN ---
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -254,6 +256,7 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 }
 
+// --- HOME PAGE ---
 class RomanHomePage extends StatefulWidget {
   const RomanHomePage({super.key});
 
@@ -265,19 +268,26 @@ class _RomanHomePageState extends State<RomanHomePage>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   late Box<Task> _box;
+  final ScrollController _scrollController =
+      ScrollController(); // Добавлен контроллер
+
   int _currentIndex = 1;
 
   String? _expandedTaskId;
   String? _selectedTaskId;
   String? _highlightTaskId;
+  String? _menuOpenTaskId;
 
   final Set<String> _openFolders = {};
+  OverlayEntry? _toastEntry;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 3, vsync: this, initialIndex: 1);
     _box = Hive.box<Task>('tasksBox');
+
+    _fixOrphans();
 
     _tabController.addListener(() {
       if (_tabController.indexIsChanging ||
@@ -286,11 +296,43 @@ class _RomanHomePageState extends State<RomanHomePage>
           _currentIndex = _tabController.index;
           _expandedTaskId = null;
           _selectedTaskId = null;
+          _menuOpenTaskId = null;
         });
       }
     });
 
     _checkUpdates();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    _scrollController.dispose();
+    _toastEntry?.remove();
+    super.dispose();
+  }
+
+  // --- LOGIC METHODS ---
+
+  void _fixOrphans() {
+    final allTasks = _box.values;
+    final parentIds = allTasks
+        .where((t) => t.parentId != null)
+        .map((t) => t.parentId)
+        .toSet();
+
+    bool changed = false;
+    for (var pid in parentIds) {
+      final parent = _box.get(pid);
+      if (parent != null && !parent.isFolder) {
+        parent.isFolder = true;
+        parent.save();
+        changed = true;
+      }
+    }
+    if (changed) {
+      setState(() {});
+    }
   }
 
   void _checkUpdates() {
@@ -340,16 +382,10 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _performUpdate() {
-    // Показываем пользователю, что процесс пошел
-    _showSnackBar("Запуск RuStore...");
+    _showTopToast("Запуск RuStore...");
 
     RustoreUpdateClient.download()
         .then((value) {
-          debugPrint("Загрузка обновления завершена кодом: $value");
-
-          // -1 обычно означает RESULT_OK в Android.
-          // Если вернулось что-то другое (например 0 - отмена),
-          // пробуем открыть ссылку вручную.
           if (value != -1) {
             _launchStoreUrl();
           }
@@ -365,10 +401,432 @@ class _RomanHomePageState extends State<RomanHomePage>
     launchUrl(uri, mode: LaunchMode.externalApplication);
   }
 
-  @override
-  void dispose() {
-    _tabController.dispose();
-    super.dispose();
+  void _showTopToast(String message) {
+    _toastEntry?.remove();
+    _toastEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        top: 60,
+        left: 20,
+        right: 20,
+        child: Material(
+          color: Colors.transparent,
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.black.withOpacity(0.9),
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Colors.black26,
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
+                  ),
+                ],
+              ),
+              child: Text(
+                message,
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    Overlay.of(context).insert(_toastEntry!);
+    Future.delayed(const Duration(seconds: 2), () {
+      _toastEntry?.remove();
+      _toastEntry = null;
+    });
+  }
+
+  // --- PARSER & DUPLICATE LOGIC ---
+
+  Future<void> _handlePasteFromClipboard() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+
+    if (text == null || text.trim().isEmpty) {
+      _showTopToast("Буфер обмена пуст");
+      return;
+    }
+
+    if (text.contains("TDL ROMAN REPORT") ||
+        text.contains("ТАРТАР") ||
+        text.contains("ТРИУМФЫ") ||
+        text.contains("СПИСОК ДЕЛ")) {
+      _showTopToast("Нельзя вставить весь отчет. Скопируйте задачу.");
+      return;
+    }
+
+    // Разбиваем по переносам строк (поддержка Windows/Unix)
+    final lines = text.split(RegExp(r'\r?\n'));
+
+    final rootRegex = RegExp(r'^(\d+)\.\s*(.*)');
+    final childRegex = RegExp(r'^(\d+)\.(\d+)\.\s*(.*)');
+
+    List<_TempTask> roots = [];
+    _TempTask? currentRoot;
+    _TempTask? currentChild;
+
+    for (var line in lines) {
+      // НЕ делаем trim() всей строки сразу, чтобы не ломать структуру, но для определения типа - делаем
+      String trimmedLine = line.trim();
+      if (trimmedLine.isEmpty) continue;
+
+      final childMatch = childRegex.firstMatch(trimmedLine);
+      if (childMatch != null) {
+        if (currentRoot == null) continue;
+        String rawTitle = childMatch.group(3) ?? "";
+        _TempTask child = _parseStyle(rawTitle);
+        currentRoot.children.add(child);
+        currentChild = child;
+        continue;
+      }
+
+      final rootMatch = rootRegex.firstMatch(trimmedLine);
+      if (rootMatch != null) {
+        if (roots.isNotEmpty) {
+          _showTopToast("Только одну структуру за раз.");
+          return;
+        }
+        String rawTitle = rootMatch.group(2) ?? "";
+        _TempTask root = _parseStyle(rawTitle);
+        root.isFolder = false;
+        roots.add(root);
+        currentRoot = root;
+        currentChild = null;
+        continue;
+      }
+
+      // ЛОГИКА СКЛЕЙКИ (многострочные задачи)
+      if (currentChild != null) {
+        currentChild.title += "\n$trimmedLine";
+        _reparseStyles(currentChild);
+      } else if (currentRoot != null) {
+        currentRoot.title += "\n$trimmedLine";
+        _reparseStyles(currentRoot);
+      }
+    }
+
+    if (roots.isEmpty) {
+      _TempTask root = _parseStyle(text.trim());
+      roots.add(root);
+    }
+
+    if (roots.length > 1) {
+      _showTopToast("Можно вставить только одну структуру.");
+      return;
+    }
+
+    final candidate = roots.first;
+    if (candidate.children.isNotEmpty) candidate.isFolder = true;
+
+    // МЯГКАЯ ПРОВЕРКА ДУБЛИКАТОВ
+    final duplicate = _box.values.firstWhere(
+      (t) =>
+          t.title == candidate.title &&
+          !t.isDeleted &&
+          !t.isCompleted &&
+          t.parentId == null,
+      orElse: () => Task(id: '', title: '', createdAt: DateTime.now()),
+    );
+
+    if (duplicate.id.isNotEmpty) {
+      _scrollToTask(duplicate);
+      _highlightTaskId = duplicate.id;
+      _triggerBlink();
+
+      final bool? shouldCreate = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: Colors.white,
+          title: const Text("Найден дубликат"),
+          content: const Text(
+            "Такая задача или папка уже существует.\nЯ подсветил её в списке.\n\nВсё равно создать копию?",
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text("Отмена", style: TextStyle(color: Colors.grey)),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text(
+                "Создать копию",
+                style: TextStyle(
+                  color: Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+
+      if (shouldCreate != true) return;
+    }
+
+    _showSandboxDialog(candidate);
+  }
+
+  void _scrollToTask(Task target) {
+    // Если папка закрыта - открываем
+    if (target.parentId != null) {
+      if (!_openFolders.contains(target.parentId!)) {
+        setState(() {
+          _openFolders.add(target.parentId!);
+        });
+      }
+    }
+
+    // Вычисляем позицию
+    final flatList = _buildHierarchicalList(
+      (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
+      (t) => !t.isDeleted,
+    );
+
+    final index = flatList.indexWhere((t) => t.id == target.id);
+
+    if (index != -1 && _scrollController.hasClients) {
+      double offset = index * 60.0; // Примерная высота
+      if (offset > _scrollController.position.maxScrollExtent) {
+        offset = _scrollController.position.maxScrollExtent;
+      }
+      _scrollController.animateTo(
+        offset,
+        duration: const Duration(milliseconds: 500),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+
+  _TempTask _parseStyle(String raw) {
+    var t = _TempTask(title: raw, urgency: 1, importance: 1);
+    _reparseStyles(t);
+    return t;
+  }
+
+  void _reparseStyles(_TempTask task) {
+    String t = task.title.trim();
+    int u = 1;
+    int i = 1;
+
+    if (t.startsWith("***") && t.endsWith("***") && t.length >= 6) {
+      u = 2;
+      i = 2;
+      t = t.substring(3, t.length - 3);
+    } else if (t.startsWith("**") && t.endsWith("**") && t.length >= 4) {
+      i = 2;
+      t = t.substring(2, t.length - 2);
+    } else if (t.startsWith("*") && t.endsWith("*") && t.length >= 2) {
+      u = 2;
+      t = t.substring(1, t.length - 1);
+    }
+
+    task.title = t.trim();
+    task.urgency = u;
+    task.importance = i;
+  }
+
+  void _showSandboxDialog(_TempTask tempRoot) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: Colors.white,
+          contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _buildSandboxItem(tempRoot, isRoot: true),
+                  if (tempRoot.children.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 16.0, top: 8),
+                      child: Column(
+                        children: tempRoot.children
+                            .map((c) => _buildSandboxItem(c, isRoot: false))
+                            .toList(),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text("Отмена", style: TextStyle(color: Colors.grey)),
+            ),
+            TextButton(
+              onPressed: () {
+                Navigator.pop(ctx);
+                _importTask(tempRoot);
+              },
+              child: const Text(
+                "Импорт",
+                style: TextStyle(
+                  color: Colors.black,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildSandboxItem(_TempTask task, {required bool isRoot}) {
+    Color color = Colors.black87;
+    FontWeight fw = FontWeight.normal;
+
+    if (task.urgency == 2) color = const Color(0xFFD32F2F);
+    if (task.importance == 2) fw = FontWeight.bold;
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey.withOpacity(0.3)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        children: [
+          if (isRoot && task.isFolder)
+            const Padding(
+              padding: EdgeInsets.only(right: 8),
+              child: Icon(Icons.folder_outlined, size: 20),
+            ),
+          Expanded(
+            child: Text(
+              task.title,
+              style: TextStyle(color: color, fontWeight: fw, fontSize: 16),
+            ),
+          ),
+          if (task.urgency == 2)
+            const Padding(
+              padding: EdgeInsets.only(left: 4),
+              child: Icon(Icons.bolt, size: 16, color: Colors.red),
+            ),
+          if (task.importance == 2)
+            const Padding(
+              padding: EdgeInsets.only(left: 4),
+              child: Icon(Icons.priority_high, size: 16, color: Colors.orange),
+            ),
+        ],
+      ),
+    );
+  }
+
+  void _importTask(_TempTask root) {
+    int newIndex;
+    if (root.urgency == 2) {
+      newIndex = _getTargetIndexForUrgentBottom();
+      _shiftIndicesDown(newIndex);
+    } else {
+      newIndex = _getBottomIndexForActive();
+    }
+
+    final rootId = const Uuid().v4();
+    final rootTask = Task(
+      id: rootId,
+      title: root.title,
+      createdAt: DateTime.now(),
+      urgency: root.urgency,
+      importance: root.importance,
+      sortIndex: newIndex,
+      isFolder: root.isFolder,
+      parentId: null,
+    );
+    _box.put(rootId, rootTask);
+
+    if (root.children.isNotEmpty) {
+      int childIndex = _getChildBottomIndex(rootId);
+
+      for (var child in root.children) {
+        final childTask = Task(
+          id: const Uuid().v4(),
+          title: child.title,
+          createdAt: DateTime.now(),
+          urgency: child.urgency,
+          importance: child.importance,
+          sortIndex: childIndex++,
+          isFolder: false,
+          parentId: rootId,
+        );
+        _box.put(childTask.id, childTask);
+      }
+    }
+
+    _highlightTaskId = rootId;
+    _triggerBlink();
+    setState(() {});
+    _showTopToast("Импортировано!");
+  }
+
+  void _triggerBlink() {
+    setState(() {});
+  }
+
+  // --- COUNTERS & LIST LOGIC ---
+
+  int _countActive() {
+    int count = 0;
+    for (var task in _box.values) {
+      if (task.isDeleted || task.isCompleted) continue;
+
+      if (task.parentId != null) {
+        final parent = _box.get(task.parentId);
+        if (parent != null && (parent.isDeleted || parent.isCompleted)) {
+          continue;
+        }
+      }
+      count++;
+    }
+    return count;
+  }
+
+  int _countCompleted() {
+    int count = 0;
+    for (var task in _box.values) {
+      if (task.isDeleted) continue;
+
+      if (task.parentId != null) {
+        final parent = _box.get(task.parentId);
+        if (parent != null && parent.isDeleted) {
+          continue;
+        }
+      }
+
+      if (task.isCompleted) {
+        count++;
+      } else {
+        if (task.parentId != null) {
+          final parent = _box.get(task.parentId);
+          if (parent != null && parent.isCompleted && !parent.isDeleted) {
+            count++;
+          }
+        }
+      }
+    }
+    return count;
+  }
+
+  int _countDeletedRoots() {
+    return _box.values.where((t) => t.isDeleted && t.parentId == null).length;
   }
 
   void _toggleExpand(String id) {
@@ -376,7 +834,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     final task = _box.get(id);
 
     setState(() {
-      // Если это ребенок, не закрываем папки
       if (task != null && task.parentId == null) {
         _openFolders.clear();
       }
@@ -420,29 +877,55 @@ class _RomanHomePageState extends State<RomanHomePage>
     });
   }
 
-  String _getTaskEmoji(Task t) {
-    if (t.isDeleted) return "☒";
-    if (t.isCompleted) return "✅";
-    return "☑️";
+  String _formatTaskTitle(Task t) {
+    String text = t.title;
+    if (t.urgency == 2 && t.importance == 2) {
+      return "***$text***";
+    } else if (t.importance == 2) {
+      return "**$text**";
+    } else if (t.urgency == 2) {
+      return "*$text*";
+    }
+    return text;
   }
 
-  String _formatListForClipboard(List<Task> tasks, String headerTitle) {
-    if (tasks.isEmpty) return "";
+  String _generateMarkdownList({
+    required bool Function(Task) rootFilter,
+    required bool Function(Task) childFilter,
+  }) {
     StringBuffer buffer = StringBuffer();
-    buffer.writeln("🏛 **$headerTitle**\n");
-    tasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
 
-    for (int i = 0; i < tasks.length; i++) {
-      final t = tasks[i];
-      final emoji = _getTaskEmoji(t);
-      String line;
-      if (t.isDeleted || t.isCompleted) {
-        line = "$emoji ${t.title}";
-      } else {
-        line = "${i + 1}. $emoji ${t.title}";
+    final rootTasks = _box.values.where(rootFilter).toList();
+    rootTasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+
+    int rootCounter = 1;
+
+    for (var task in rootTasks) {
+      if (rootCounter > 1) {
+        buffer.writeln("");
       }
-      buffer.writeln(line);
-      buffer.writeln("");
+
+      final formattedTitle = _formatTaskTitle(task);
+      buffer.writeln("$rootCounter. $formattedTitle");
+
+      if (task.isFolder) {
+        final children = _box.values
+            .where((t) => t.parentId == task.id && childFilter(t))
+            .toList();
+
+        children.sort((a, b) {
+          if (a.urgency != b.urgency) return b.urgency.compareTo(a.urgency);
+          return a.sortIndex.compareTo(b.sortIndex);
+        });
+
+        int childCounter = 1;
+        for (var child in children) {
+          final childTitle = _formatTaskTitle(child);
+          buffer.writeln("    $rootCounter.$childCounter. $childTitle");
+          childCounter++;
+        }
+      }
+      rootCounter++;
     }
     return buffer.toString();
   }
@@ -450,47 +933,100 @@ class _RomanHomePageState extends State<RomanHomePage>
   void _copySpecificList(int tabIndex) {
     String text = "";
     if (tabIndex == 0) {
-      final tasks = _box.values.where((t) => t.isDeleted).toList();
-      text = _formatListForClipboard(tasks, "ТАРТАР (Удаленные)");
+      text = "🏛 **ТАРТАР (Удаленные)**\n\n";
+      text += _generateMarkdownList(
+        rootFilter: (t) => t.isDeleted && t.parentId == null,
+        childFilter: (t) => t.isDeleted,
+      );
     } else if (tabIndex == 1) {
-      final tasks = _box.values
-          .where((t) => !t.isDeleted && !t.isCompleted)
-          .toList();
-      text = _formatListForClipboard(tasks, "СПИСОК ДЕЛ");
+      text = "🏛 **СПИСОК ДЕЛ**\n\n";
+      text += _generateMarkdownList(
+        rootFilter: (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
+        childFilter: (t) => !t.isDeleted && !t.isCompleted,
+      );
     } else {
-      final tasks = _box.values
-          .where((t) => t.isCompleted && !t.isDeleted)
-          .toList();
-      text = _formatListForClipboard(tasks, "ТРИУМФЫ (Выполнено)");
+      text = "🏛 **ТРИУМФЫ (Выполнено)**\n\n";
+      text += _generateMarkdownList(
+        rootFilter: (t) => t.isCompleted && !t.isDeleted && t.parentId == null,
+        childFilter: (t) => t.isCompleted && !t.isDeleted,
+      );
     }
 
     if (text.isEmpty) {
-      _showSnackBar("Список пуст");
+      _showTopToast("Список пуст");
     } else {
       Clipboard.setData(ClipboardData(text: text));
-      _showSnackBar("Вкладка скопирована!");
+      _showTopToast("Вкладка скопирована!");
     }
   }
 
   void _copyAllLists() {
-    final active = _box.values
-        .where((t) => !t.isDeleted && !t.isCompleted)
-        .toList();
-    final completed = _box.values
-        .where((t) => t.isCompleted && !t.isDeleted)
-        .toList();
-    final deleted = _box.values.where((t) => t.isDeleted).toList();
-
     StringBuffer buffer = StringBuffer();
     buffer.writeln("🏛 **TDL ROMAN REPORT** 🏛\n");
-    buffer.write(_formatListForClipboard(active, "АКТУАЛЬНОЕ"));
-    buffer.write("-------------------\n");
-    buffer.write(_formatListForClipboard(completed, "ВЫПОЛНЕНО"));
-    buffer.write("-------------------\n");
-    buffer.write(_formatListForClipboard(deleted, "УДАЛЕНО"));
+
+    buffer.writeln("АКТУАЛЬНОЕ:");
+    buffer.write(
+      _generateMarkdownList(
+        rootFilter: (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
+        childFilter: (t) => !t.isDeleted && !t.isCompleted,
+      ),
+    );
+    buffer.write("\n-------------------\n");
+
+    buffer.writeln("ВЫПОЛНЕНО:");
+    buffer.write(
+      _generateMarkdownList(
+        rootFilter: (t) => t.isCompleted && !t.isDeleted && t.parentId == null,
+        childFilter: (t) => t.isCompleted && !t.isDeleted,
+      ),
+    );
+    buffer.write("\n-------------------\n");
+
+    buffer.writeln("УДАЛЕНО:");
+    buffer.write(
+      _generateMarkdownList(
+        rootFilter: (t) => t.isDeleted && t.parentId == null,
+        childFilter: (t) => t.isDeleted,
+      ),
+    );
 
     Clipboard.setData(ClipboardData(text: buffer.toString()));
-    _showSnackBar("ВСЕ списки скопированы!");
+    _showTopToast("ВСЕ списки скопированы!");
+  }
+
+  void _copySingleTaskTree(Task rootTask) {
+    StringBuffer buffer = StringBuffer();
+    final formattedTitle = _formatTaskTitle(rootTask);
+    buffer.writeln("1. $formattedTitle");
+
+    if (rootTask.isFolder) {
+      bool Function(Task) childFilter;
+
+      if (!rootTask.isDeleted && !rootTask.isCompleted) {
+        childFilter = (t) => !t.isDeleted && !t.isCompleted;
+      } else {
+        childFilter = (t) => !t.isDeleted;
+      }
+
+      final children = _box.values
+          .where((t) => t.parentId == rootTask.id && childFilter(t))
+          .toList();
+
+      children.sort((a, b) {
+        if (a.urgency != b.urgency) return b.urgency.compareTo(a.urgency);
+        return a.sortIndex.compareTo(b.sortIndex);
+      });
+
+      int childCounter = 1;
+      for (var child in children) {
+        final childTitle = _formatTaskTitle(child);
+        buffer.writeln("    1.$childCounter. $childTitle");
+        childCounter++;
+      }
+    }
+
+    Clipboard.setData(ClipboardData(text: buffer.toString()));
+    _showTopToast("Задача скопирована!");
   }
 
   Future<void> _backupData() async {
@@ -504,7 +1040,7 @@ class _RomanHomePageState extends State<RomanHomePage>
 
       await Share.shareXFiles([XFile(file.path)], text: 'TDL-Roman Backup');
     } catch (e) {
-      _showSnackBar("Ошибка бэкапа: $e");
+      _showTopToast("Ошибка бэкапа: $e");
     }
   }
 
@@ -530,6 +1066,11 @@ class _RomanHomePageState extends State<RomanHomePage>
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
+                  if (tabIndex == 1)
+                    _buildCopyActionButton("ВСТАВИТЬ", Icons.paste, () {
+                      Navigator.pop(ctx);
+                      _handlePasteFromClipboard();
+                    }),
                   _buildCopyActionButton("БЭКАП", Icons.save, () {
                     Navigator.pop(ctx);
                     _backupData();
@@ -550,6 +1091,62 @@ class _RomanHomePageState extends State<RomanHomePage>
         );
       },
     );
+  }
+
+  void _showItemContextMenu(Task task) {
+    setState(() {
+      _menuOpenTaskId = task.id;
+    });
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          padding: const EdgeInsets.all(20),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                task.title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+              const SizedBox(height: 20),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                children: [
+                  if (!task.isDeleted && !task.isCompleted)
+                    _buildCopyActionButton("РЕДАКТИРОВАТЬ", Icons.edit, () {
+                      Navigator.pop(ctx);
+                      _showTaskDialog(context, task: task);
+                    }),
+                  _buildCopyActionButton("КОПИРОВАТЬ", Icons.copy, () {
+                    Navigator.pop(ctx);
+                    _copySingleTaskTree(task);
+                  }),
+                ],
+              ),
+              const SizedBox(height: 20),
+            ],
+          ),
+        );
+      },
+    ).whenComplete(() {
+      if (mounted) {
+        setState(() {
+          _menuOpenTaskId = null;
+        });
+      }
+    });
   }
 
   Widget _buildCopyActionButton(
@@ -580,18 +1177,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       ),
     );
   }
-
-  void _showSnackBar(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: Colors.black87,
-        duration: const Duration(seconds: 1),
-      ),
-    );
-  }
-
-  // --- ЛОГИКА ИНДЕКСОВ ---
 
   void _shiftIndicesDown(int targetIndex) {
     final allActive = _box.values
@@ -719,8 +1304,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     return all.map((e) => e.sortIndex).reduce(min);
   }
 
-  // --- МЕТОДЫ УПРАВЛЕНИЯ ЗАДАЧАМИ ---
-
   void _saveNewTask(
     String title,
     int urgency,
@@ -729,8 +1312,11 @@ class _RomanHomePageState extends State<RomanHomePage>
     bool isFolder,
     String? parentId,
   ) {
+    if (urgency == 2 && positionMode == 1) {
+      positionMode = 2;
+    }
+
     int newIndex;
-    // Если создаем внутри папки, считаем индексы детей
     if (parentId != null) {
       String pid = parentId;
       if (urgency == 2) {
@@ -747,9 +1333,7 @@ class _RomanHomePageState extends State<RomanHomePage>
         } else
           newIndex = _getChildBottomIndex(pid);
       }
-    }
-    // Если корень
-    else {
+    } else {
       if (urgency == 2) {
         if (positionMode == 0) {
           newIndex = _getTopIndexForState();
@@ -779,7 +1363,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
     _box.put(newTask.id, newTask);
 
-    // Включаем мигание
     _highlightTaskId = newTask.id;
 
     setState(() {});
@@ -791,6 +1374,10 @@ class _RomanHomePageState extends State<RomanHomePage>
     int importance,
     int positionMode,
   ) {
+    if (urgency == 2 && positionMode == 1) {
+      positionMode = 2;
+    }
+
     task.urgency = urgency;
     task.importance = importance;
 
@@ -903,8 +1490,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     setState(() {});
   }
 
-  // --- ГЛАВНАЯ ЛОГИКА СПИСКА ---
-
   List<Task> _buildHierarchicalList(
     bool Function(Task) filterRoots,
     bool Function(Task) filterChildren,
@@ -929,7 +1514,6 @@ class _RomanHomePageState extends State<RomanHomePage>
 
         flatList.addAll(children);
 
-        // Плейсхолдер ТОЛЬКО в Активном списке (Tab 1)
         if (_currentIndex == 1) {
           flatList.add(
             Task(
@@ -981,7 +1565,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       }
     }
 
-    // АВТО-СТАТУС
     if (item.parentId == null) {
       if (newIndex < flatList.length - 1) {
         final neighborBelow = flatList[newIndex + 1];
@@ -1062,42 +1645,31 @@ class _RomanHomePageState extends State<RomanHomePage>
                 unselectedLabelColor: _currentIndex == 2
                     ? Colors.white38
                     : Colors.black38,
+                onTap: (index) {
+                  // Перехватываем стандартный onTap в _buildTab
+                },
                 tabs: [
-                  _buildTab(
-                    Icons.delete_outline,
-                    _box.values.where((t) => t.isDeleted).length,
-                    0,
-                  ),
-                  _buildTab(
-                    Icons.list_alt,
-                    _box.values
-                        .where((t) => !t.isDeleted && !t.isCompleted)
-                        .length,
-                    1,
-                  ),
-                  _buildTab(
-                    Icons.emoji_events_outlined,
-                    _box.values
-                        .where(
-                          (t) =>
-                              t.isCompleted &&
-                              !t.isDeleted &&
-                              t.parentId == null,
-                        )
-                        .length,
-                    2,
-                  ),
+                  _buildTab(Icons.delete_outline, _countDeletedRoots(), 0),
+                  _buildTab(Icons.list_alt, _countActive(), 1),
+                  _buildTab(Icons.emoji_events_outlined, _countCompleted(), 2),
                 ],
               ),
             ),
             Expanded(
-              child: TabBarView(
-                controller: _tabController,
-                children: [
-                  _buildDeletedTasksList(),
-                  _buildActiveTasksList(),
-                  _buildCompletedTasksList(),
-                ],
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: () {
+                  HapticFeedback.lightImpact();
+                  _showClipboardMenu(_currentIndex);
+                },
+                child: TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _buildDeletedTasksList(),
+                    _buildActiveTasksList(),
+                    _buildCompletedTasksList(),
+                  ],
+                ),
               ),
             ),
           ],
@@ -1136,9 +1708,14 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   Widget _buildTab(IconData icon, int count, int index) {
     return GestureDetector(
-      onLongPress: () {
-        HapticFeedback.mediumImpact();
-        _showClipboardMenu(index);
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        if (_currentIndex == index) {
+          HapticFeedback.mediumImpact();
+          _showClipboardMenu(index);
+        } else {
+          _tabController.animateTo(index);
+        }
       },
       child: Container(
         color: Colors.transparent,
@@ -1201,6 +1778,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     final isSelected = _selectedTaskId == task.id;
     final shouldBlink = _highlightTaskId == task.id;
     final isFolderOpen = _openFolders.contains(task.id);
+    final isMenuOpen = _menuOpenTaskId == task.id;
 
     Widget content = TaskItemWidget(
       key: ValueKey(task.id),
@@ -1211,6 +1789,7 @@ class _RomanHomePageState extends State<RomanHomePage>
       showCup: showCup,
       shouldBlink: shouldBlink,
       isFolderOpen: isFolderOpen,
+      isMenuOpen: isMenuOpen,
       tabIndex: _currentIndex,
       onBlinkFinished: () {
         if (_highlightTaskId == task.id) {
@@ -1219,25 +1798,15 @@ class _RomanHomePageState extends State<RomanHomePage>
       },
       onToggleExpand: () => _toggleExpand(task.id),
       onToggleSelection: () => _toggleSelection(task.id),
-      onDoubleTap: () {
-        if (_currentIndex == 1) {
-          // В активном списке: ВСЕГДА открываем диалог (и для задач, и для папок)
-          if (!task.isDeleted && !task.isCompleted) {
-            _showTaskDialog(context, task: task);
-          }
-        } else {
-          // В Мусорке/Выполнено: Только открываем/закрываем папку
-          if (task.isFolder) {
-            _toggleFolder(task.id);
-          }
-        }
+      onMenuTap: () {
+        HapticFeedback.lightImpact();
+        _showItemContextMenu(task);
       },
       onFolderTap: () => _toggleFolder(task.id),
       decorationBuilder: (t) => _getTaskDecoration(t, _currentIndex),
       indicatorBuilder: (t, s) => _buildLeftIndicator(t, s, _currentIndex),
     );
 
-    // БЛОКИРОВКА СВАЙПОВ ДЛЯ ДЕТЕЙ В МУСОРКЕ И ВЫПОЛНЕННЫХ
     bool isLockedChild = (_currentIndex != 1) && (task.parentId != null);
     if (isLockedChild) {
       return content;
@@ -1397,6 +1966,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
 
     return ReorderableListView.builder(
+      scrollController: _scrollController,
       physics: const BouncingScrollPhysics(
         parent: AlwaysScrollableScrollPhysics(),
       ),
@@ -1435,10 +2005,10 @@ class _RomanHomePageState extends State<RomanHomePage>
   ) {
     final flatList = _buildHierarchicalList(rootFilter, childFilter);
     return ListView.builder(
+      controller: _scrollController,
       physics: const BouncingScrollPhysics(),
       padding: const EdgeInsets.symmetric(vertical: 10),
       itemCount: flatList.length,
-      // Исправлено: showCup только для таба 2 и для не папок
       itemBuilder: (context, index) {
         bool showCup = (_currentIndex == 2);
         if (_currentIndex == 0) showCup = false;
@@ -1455,7 +2025,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // --- ДИАЛОГ: ОБНОВЛЕНО (Принимает parentId) ---
   void _showTaskDialog(BuildContext context, {Task? task, String? parentId}) {
     final titleController = TextEditingController(text: task?.title ?? '');
     int urgency = task?.urgency ?? 1;
@@ -1466,8 +2035,14 @@ class _RomanHomePageState extends State<RomanHomePage>
     int blinkStage = 0;
     Timer? attentionTimer;
 
-    // Если создаем в папку, принудительно не папка
     if (parentId != null) isFolder = false;
+
+    bool hasChildren = false;
+    if (task != null) {
+      hasChildren = _box.values.any(
+        (t) => t.parentId == task.id && !t.isDeleted,
+      );
+    }
 
     showDialog(
       context: context,
@@ -1577,19 +2152,6 @@ class _RomanHomePageState extends State<RomanHomePage>
                           ),
                         ),
                       ),
-                      if ((task == null || task.parentId == null) &&
-                          parentId == null)
-                        Row(
-                          children: [
-                            Checkbox(
-                              value: isFolder,
-                              activeColor: Colors.black,
-                              onChanged: (val) =>
-                                  setDialogState(() => isFolder = val!),
-                            ),
-                            const Text("Это папка"),
-                          ],
-                        ),
                       const SizedBox(height: 8),
                       SizedBox(
                         height: 170,
@@ -1603,6 +2165,29 @@ class _RomanHomePageState extends State<RomanHomePage>
                                   Row(
                                     mainAxisAlignment: MainAxisAlignment.center,
                                     children: [
+                                      if ((task == null ||
+                                              task.parentId == null) &&
+                                          parentId == null)
+                                        Padding(
+                                          padding: const EdgeInsets.only(
+                                            right: 20,
+                                          ),
+                                          child: _buildDialogFolderButton(
+                                            isFolder,
+                                            hasChildren,
+                                            () {
+                                              if (hasChildren) {
+                                                _showTopToast(
+                                                  "Сначала очистите папку",
+                                                );
+                                                return;
+                                              }
+                                              setDialogState(
+                                                () => isFolder = !isFolder,
+                                              );
+                                            },
+                                          ),
+                                        ),
                                       _buildDialogStateButton(
                                         Icons.bolt,
                                         "Срочно",
@@ -1663,7 +2248,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                                                 text: titleController.text,
                                               ),
                                             );
-                                            _showSnackBar("Текст скопирован");
+                                            _showTopToast("Текст скопирован");
                                           }
                                         },
                                       ),
@@ -1732,6 +2317,93 @@ class _RomanHomePageState extends State<RomanHomePage>
           },
         );
       },
+    );
+  }
+
+  Widget _buildDialogFolderButton(
+    bool isFolder,
+    bool isLocked,
+    VoidCallback onTap,
+  ) {
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.lightImpact();
+        onTap();
+      },
+      child: Column(
+        children: [
+          Container(
+            width: 45,
+            height: 45,
+            alignment: Alignment.center,
+            child: SizedBox(
+              width: 26,
+              height: 26,
+              child: Stack(
+                children: [
+                  Container(
+                    decoration: BoxDecoration(
+                      color: isFolder ? Colors.black : Colors.transparent,
+                      border: Border.all(
+                        color: isFolder
+                            ? Colors.black
+                            : Colors.grey.withOpacity(0.5),
+                        width: 2,
+                      ),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                  Positioned(
+                    top: 0,
+                    left: 0,
+                    child: Container(
+                      width: 11,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: isFolder
+                            ? Colors.black
+                            : Colors.grey.withOpacity(0.5),
+                        borderRadius: const BorderRadius.only(
+                          topLeft: Radius.circular(3),
+                          bottomRight: Radius.circular(3),
+                        ),
+                      ),
+                    ),
+                  ),
+                  if (isFolder)
+                    const Center(
+                      child: Icon(Icons.check, size: 18, color: Colors.white),
+                    ),
+                  if (isLocked)
+                    Center(
+                      child: Container(
+                        padding: const EdgeInsets.all(2),
+                        decoration: const BoxDecoration(
+                          color: Colors.white,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.lock,
+                          size: 14,
+                          color: Colors.black,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            "Папка",
+            style: TextStyle(
+              fontSize: 10,
+              color: isFolder ? Colors.black : Colors.grey,
+              fontWeight: isFolder ? FontWeight.bold : FontWeight.normal,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1864,7 +2536,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // --- ЦВЕТА ЗАДАЧ (ЛОГИКА) ---
   BoxDecoration _getTaskDecoration(Task task, int tabIndex) {
     if (tabIndex == 0) {
       return BoxDecoration(
@@ -1882,7 +2553,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       );
     }
 
-    // Вкладка 2 (Триумфы): Золото для всех задач (включая детей)
     if (tabIndex == 2) {
       if (task.urgency == 2 && task.importance == 2)
         return _grad([
@@ -1929,7 +2599,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 2)),
   ];
 
-  // --- ИКОНКА ПАПКИ И ЧЕКБОКСЫ (СТРОГО ПО ТЗ) ---
   Widget _buildLeftIndicator(Task task, bool isSelected, int tabIndex) {
     if (isSelected) {
       return GestureDetector(
@@ -1961,7 +2630,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     }
     Widget iconWidget;
 
-    // ПАПКА В АКТИВНОМ СПИСКЕ (Tab 1) - Специальная иконка
     if (task.isFolder && tabIndex == 1) {
       return GestureDetector(
         behavior: HitTestBehavior.translucent,
@@ -2003,20 +2671,13 @@ class _RomanHomePageState extends State<RomanHomePage>
           ),
         ),
       );
-    }
-    // ПАПКА В ДРУГИХ СПИСКАХ ИЛИ ЗАДАЧА - Обычные чекбоксы
-    else {
+    } else {
       IconData? icon;
-      // В корзине (Tab 0) всегда крестик
       if (tabIndex == 0) {
         icon = Icons.close;
-      }
-      // В Триумфах (Tab 2) всегда галочка
-      else if (tabIndex == 2) {
+      } else if (tabIndex == 2) {
         icon = Icons.check;
-      }
-      // В активном списке (Tab 1) зависит от статуса
-      else {
+      } else {
         if (task.isCompleted)
           icon = Icons.check;
         else
@@ -2067,11 +2728,12 @@ class TaskItemWidget extends StatefulWidget {
   final bool showCup;
   final bool shouldBlink;
   final bool isFolderOpen;
+  final bool isMenuOpen;
   final int tabIndex;
   final VoidCallback onBlinkFinished;
   final VoidCallback onToggleExpand;
   final VoidCallback onToggleSelection;
-  final VoidCallback onDoubleTap;
+  final VoidCallback onMenuTap;
   final VoidCallback onFolderTap;
   final BoxDecoration Function(Task) decorationBuilder;
   final Widget Function(Task, bool) indicatorBuilder;
@@ -2085,11 +2747,12 @@ class TaskItemWidget extends StatefulWidget {
     this.showCup = false,
     this.shouldBlink = false,
     this.isFolderOpen = false,
+    this.isMenuOpen = false,
     required this.tabIndex,
     required this.onBlinkFinished,
     required this.onToggleExpand,
     required this.onToggleSelection,
-    required this.onDoubleTap,
+    required this.onMenuTap,
     required this.onFolderTap,
     required this.decorationBuilder,
     required this.indicatorBuilder,
@@ -2107,7 +2770,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
   @override
   void initState() {
     super.initState();
-    // Мигание запускаем тут, если виджет создается и должен мигать
     if (widget.shouldBlink) {
       _startBlinking();
     }
@@ -2157,7 +2819,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
     FontWeight fontWeight = FontWeight.normal;
     TextDecoration textDecoration = TextDecoration.none;
 
-    // ЦВЕТ ТЕКСТА
     if (widget.tabIndex == 0) {
       textColor = Colors.grey;
       textDecoration = TextDecoration.lineThrough;
@@ -2176,7 +2837,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
 
     BoxDecoration decoration = widget.decorationBuilder(widget.task);
 
-    // Стиль стопки для папок
     if (widget.task.isFolder &&
         !widget.task.isDeleted &&
         !widget.task.isCompleted) {
@@ -2192,13 +2852,38 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       );
     }
 
+    // ЛАКОНИЧНОЕ ВЫДЕЛЕНИЕ (СЕРЫЙ ФОН) ПРИ ОТКРЫТОМ МЕНЮ
+    if (widget.isMenuOpen) {
+      Color menuHighlight;
+      if (widget.tabIndex == 2) {
+        menuHighlight = Colors.white24;
+      } else {
+        menuHighlight = Colors.grey.shade300;
+      }
+
+      if (decoration.gradient == null) {
+        decoration = decoration.copyWith(color: menuHighlight);
+      } else {
+        decoration = decoration.copyWith(
+          border: Border.all(color: Colors.white.withOpacity(0.5), width: 2),
+        );
+      }
+    }
+
     Color borderColor = Colors.transparent;
     if (_isHighlighed) {
       borderColor = Colors.red;
     }
-    decoration = decoration.copyWith(
-      border: Border.all(color: borderColor, width: 3),
-    );
+
+    // Если есть выделение меню и нет мигания - оставляем стиль меню.
+    // Если идет мигание - перекрываем красной рамкой.
+    if (!_isHighlighed && widget.isMenuOpen && decoration.border != null) {
+      // no-op, используем бордер из блока isMenuOpen
+    } else {
+      decoration = decoration.copyWith(
+        border: Border.all(color: borderColor, width: 3),
+      );
+    }
 
     EdgeInsets margin = const EdgeInsets.symmetric(vertical: 4, horizontal: 16);
     if (widget.task.parentId != null) {
@@ -2214,10 +2899,9 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       decoration: decoration,
       child: InkWell(
         onTap: onTap,
-        onDoubleTap: widget.onDoubleTap,
         borderRadius: BorderRadius.circular(8),
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8, right: 4),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
@@ -2244,10 +2928,41 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
                 const SizedBox(width: 8),
                 const Icon(Icons.emoji_events, color: Colors.white, size: 28),
               ],
+              GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTap: widget.onMenuTap,
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  alignment: Alignment.center,
+                  child: Icon(
+                    Icons.more_vert,
+                    color: widget.tabIndex == 2
+                        ? Colors.white54
+                        : Colors.grey[400],
+                    size: 24,
+                  ),
+                ),
+              ),
             ],
           ),
         ),
       ),
     );
   }
+}
+
+class _TempTask {
+  String title;
+  int urgency;
+  int importance;
+  bool isFolder;
+  List<_TempTask> children;
+
+  _TempTask({
+    required this.title,
+    this.urgency = 1,
+    this.importance = 1,
+    this.isFolder = false,
+  }) : children = [];
 }
