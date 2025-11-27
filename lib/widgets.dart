@@ -381,8 +381,9 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       borderColor = Colors.red;
     }
 
-    if (!_isHighlighed && widget.isMenuOpen && decoration.border != null) {
-    } else {
+    if (!(_isHighlighed == false &&
+        widget.isMenuOpen &&
+        decoration.border != null)) {
       decoration = decoration.copyWith(
         border: Border.all(color: borderColor, width: 3),
       );
@@ -397,84 +398,141 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
         ? widget.onFolderTap
         : widget.onToggleExpand;
 
-    return VisibilityDetector(
-      key: widget.key ?? Key(widget.task.id),
-      onVisibilityChanged: (info) {
-        if (info.visibleFraction > 0.5 && widget.shouldBlink && !_hasBlinked) {
-          _startBlinking();
-        }
-      },
-      child: Container(
-        margin: margin,
-        decoration: decoration,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(8),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.only(right: 12, top: 4),
-                  child: widget.indicatorBuilder(
-                    widget.task,
-                    widget.isSelected,
-                  ),
-                ),
-                Expanded(
-                  child: Padding(
-                    padding: const EdgeInsets.only(top: 4, bottom: 4),
-                    child: Text(
-                      widget.task.title,
-                      maxLines: widget.isExpanded ? null : 2,
-                      overflow: widget.isExpanded
-                          ? null
-                          : TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 18,
-                        color: textColor,
-                        height: 1.2,
-                        fontWeight: fontWeight,
-                        decoration: textDecoration,
-                        decorationColor: Colors.grey,
-                      ),
-                    ),
-                  ),
-                ),
-                if (widget.showCup) ...[
-                  const SizedBox(width: 8),
-                  const Padding(
-                    padding: EdgeInsets.only(top: 2),
-                    child: Icon(
-                      Icons.emoji_events,
-                      color: Colors.white,
-                      size: 28,
-                    ),
-                  ),
-                ],
-                GestureDetector(
-                  behavior: HitTestBehavior.translucent,
-                  onTap: widget.onMenuTap,
-                  child: Container(
-                    width: 40,
-                    height: 40,
-                    alignment: Alignment.topCenter,
-                    padding: const EdgeInsets.only(top: 2),
-                    child: Icon(
-                      Icons.more_vert,
-                      color: widget.tabIndex == 2
-                          ? Colors.white54
-                          : Colors.grey[400],
-                      size: 24,
-                    ),
-                  ),
-                ),
-              ],
+    Widget content = InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(right: 12, top: 4),
+              child: widget.indicatorBuilder(widget.task, widget.isSelected),
             ),
-          ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.only(top: 4, bottom: 4),
+                child: Text(
+                  widget.task.title,
+                  maxLines: widget.isExpanded ? null : 2,
+                  overflow: widget.isExpanded ? null : TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 18,
+                    color: textColor,
+                    height: 1.2,
+                    fontWeight: fontWeight,
+                    decoration: textDecoration,
+                    decorationColor: Colors.grey,
+                  ),
+                ),
+              ),
+            ),
+            if (widget.showCup) ...[
+              const SizedBox(width: 8),
+              const Padding(
+                padding: EdgeInsets.only(top: 2),
+                child: Icon(Icons.emoji_events, color: Colors.white, size: 28),
+              ),
+            ],
+            GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: widget.onMenuTap,
+              child: Container(
+                width: 40,
+                height: 40,
+                color: Colors.transparent,
+                alignment: Alignment.topCenter,
+                padding: const EdgeInsets.only(top: 2),
+                child: Icon(
+                  Icons.more_vert,
+                  color: widget.tabIndex == 2
+                      ? Colors.white54
+                      : Colors.grey[400],
+                  size: 24,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
+
+    // --- FIX: Stack effect ONLY for Triumph (Tab 2) ---
+    bool useStackEffect = widget.task.isFolder && widget.tabIndex == 2;
+
+    if (useStackEffect) {
+      BoxDecoration backLayerDeco = decoration.copyWith(
+        color: decoration.color?.withOpacity(0.6),
+        boxShadow: [],
+        gradient: null,
+      );
+
+      if (decoration.gradient != null) {
+        backLayerDeco = backLayerDeco.copyWith(
+          color: const Color(0xFFBF953F).withOpacity(0.5),
+        );
+      }
+
+      return VisibilityDetector(
+        key: widget.key ?? Key(widget.task.id),
+        onVisibilityChanged: (info) {
+          if (info.visibleFraction > 0.5 &&
+              widget.shouldBlink &&
+              !_hasBlinked) {
+            _startBlinking();
+          }
+        },
+        child: Container(
+          margin: margin,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Positioned(
+                top: 4,
+                left: 0,
+                right: 0,
+                bottom: -4,
+                child: Container(
+                  decoration: backLayerDeco.copyWith(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+              Positioned(
+                top: 2,
+                left: 0,
+                right: 0,
+                bottom: -2,
+                child: Container(
+                  decoration: backLayerDeco.copyWith(
+                    color: backLayerDeco.color?.withOpacity(0.8),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+              Container(decoration: decoration, child: content),
+            ],
+          ),
+        ),
+      );
+    } else {
+      // Normal Folders (Tab 0 and 1) -> Clean Container
+      return VisibilityDetector(
+        key: widget.key ?? Key(widget.task.id),
+        onVisibilityChanged: (info) {
+          if (info.visibleFraction > 0.5 &&
+              widget.shouldBlink &&
+              !_hasBlinked) {
+            _startBlinking();
+          }
+        },
+        child: Container(
+          margin: margin,
+          decoration: decoration,
+          child: content,
+        ),
+      );
+    }
   }
 }

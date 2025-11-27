@@ -79,7 +79,7 @@ class RomanHomePage extends StatefulWidget {
 }
 
 class _RomanHomePageState extends State<RomanHomePage>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late TabController _tabController;
   late Box<Task> _box;
   final ScrollController _scrollController = ScrollController();
@@ -97,6 +97,7 @@ class _RomanHomePageState extends State<RomanHomePage>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabController = TabController(length: 3, vsync: this, initialIndex: 1);
     _box = Hive.box<Task>('tasksBox');
 
@@ -120,10 +121,54 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _tabController.dispose();
     _scrollController.dispose();
     _toastEntry?.remove();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _schedulePauseNotification();
+    } else if (state == AppLifecycleState.resumed) {
+      flutterLocalNotificationsPlugin.cancel(1);
+    }
+  }
+
+  void _schedulePauseNotification() async {
+    final activeTasks = _box.values
+        .where((t) => !t.isDeleted && !t.isCompleted && t.parentId == null)
+        .toList();
+
+    if (activeTasks.isEmpty) return;
+
+    activeTasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+    final topTask = activeTasks.first;
+
+    final now = tz.TZDateTime.now(tz.local);
+    final scheduledDate = now.add(const Duration(minutes: 5));
+
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      1,
+      'Не забывай о главном',
+      topTask.title,
+      scheduledDate,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'pause_reminder',
+          'Напоминание при выходе',
+          channelDescription: 'Напоминает о задачах через 5 минут',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(),
+      ),
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+    );
   }
 
   void _scheduleDailyNotification() async {
@@ -244,21 +289,32 @@ class _RomanHomePageState extends State<RomanHomePage>
         });
   }
 
-  void _performUpdate() async {
-    _showTopToast("Создание резервной копии...");
-    await _backupData();
+  Future<void> _performUpdate() async {
+    // FIX: Wrapped in try-catch to prevent crashes during intent switching
+    try {
+      _showTopToast("Создание резервной копии...");
+      // Await backup to ensure file is written, but don't crash if it fails
+      await _backupData(silent: true);
 
-    _showTopToast("Запуск RuStore...");
-    RustoreUpdateClient.download()
-        .then((value) {
-          if (value != -1) {
+      // Delay to let the Toast render and UI settle before heavy operation
+      await Future.delayed(const Duration(seconds: 1));
+
+      _showTopToast("Запуск RuStore...");
+
+      // Try native download
+      RustoreUpdateClient.download()
+          .then((value) {
+            // value != -1 logic from docs, but if it fails silently -> catchError
+          })
+          .catchError((e) {
+            debugPrint("Native update error: $e");
             _launchStoreUrl();
-          }
-        })
-        .catchError((e) {
-          debugPrint("Ошибка нативной загрузки: $e");
-          _launchStoreUrl();
-        });
+          });
+    } catch (e) {
+      // Global fallback to ensure app doesn't just die
+      debugPrint("Update flow error: $e");
+      _launchStoreUrl();
+    }
   }
 
   void _launchStoreUrl() {
@@ -770,18 +826,37 @@ class _RomanHomePageState extends State<RomanHomePage>
     _showTopToast("Задача скопирована!");
   }
 
-  Future<void> _backupData() async {
+  Future<void> _backupData({bool silent = false}) async {
     try {
       final tasks = _box.values.map((e) => e.toJson()).toList();
       final jsonString = jsonEncode({'tasks': tasks});
 
-      final directory = await getTemporaryDirectory();
-      final file = File('${directory.path}/tdl_backup.json');
+      final directory = await getApplicationDocumentsDirectory();
+      final backupDir = Directory('${directory.path}/backups');
+      if (!backupDir.existsSync()) {
+        backupDir.createSync();
+      }
+
+      final timestamp = DateTime.now().millisecondsSinceEpoch;
+      final file = File('${backupDir.path}/tdl_backup_$timestamp.json');
       await file.writeAsString(jsonString);
 
-      await Share.shareXFiles([XFile(file.path)], text: 'TDL-Roman Backup');
+      final files = backupDir.listSync()
+        ..sort(
+          (a, b) => b.statSync().modified.compareTo(a.statSync().modified),
+        );
+
+      if (files.length > 10) {
+        for (var i = 10; i < files.length; i++) {
+          files[i].deleteSync();
+        }
+      }
+
+      if (!silent) {
+        await Share.shareXFiles([XFile(file.path)], text: 'TDL-Roman Backup');
+      }
     } catch (e) {
-      _showTopToast("Ошибка бэкапа: $e");
+      if (!silent) _showTopToast("Ошибка бэкапа: $e");
     }
   }
 
@@ -1793,89 +1868,82 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   BoxDecoration _getTaskDecoration(Task task, int tabIndex) {
-    BoxShadow? folderShadow;
-    if (task.isFolder) {
-      folderShadow = BoxShadow(
-        color: Colors.black.withOpacity(0.2),
-        offset: const Offset(0, 4),
-        blurRadius: 0,
-        spreadRadius: -2,
-      );
-    }
+    BoxShadow? basicShadow = const BoxShadow(
+      color: Colors.black12,
+      blurRadius: 3,
+      offset: Offset(0, 2),
+    );
 
     if (tabIndex == 0) {
+      // Deleted
       return BoxDecoration(
         color: Colors.grey[200],
         borderRadius: BorderRadius.circular(8),
-        boxShadow: folderShadow != null
-            ? [..._shadow(), folderShadow]
-            : _shadow(),
+        boxShadow: [basicShadow],
       );
     }
 
     if (tabIndex == 1) {
+      // Active
+      // FIX: If it is a folder in Tab 1, we want a stronger look but not stack
+      if (task.isFolder) {
+        return BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.black87, width: 2), // Visible Border
+          boxShadow: [basicShadow],
+        );
+      }
       return BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(8),
-        boxShadow: folderShadow != null
-            ? [..._shadow(), folderShadow]
-            : _shadow(),
+        boxShadow: [basicShadow],
       );
     }
 
     if (tabIndex == 2) {
+      // Triumph
       if (task.urgency == 2 && task.importance == 2)
         return _grad([
           const Color(0xFFBF953F),
           const Color(0xFFFCF6BA),
           const Color(0xFFAA771C),
-        ], folderShadow);
+        ], basicShadow);
       if (task.importance == 2)
         return _grad([
           const Color(0xFFE0E0E0),
           const Color(0xFFFFFFFF),
           const Color(0xFFAAAAAA),
-        ], folderShadow);
+        ], basicShadow);
       if (task.urgency == 2)
         return _grad([
           const Color(0xFF1A237E),
           const Color(0xFF3949AB),
           const Color(0xFF1A237E),
-        ], folderShadow);
+        ], basicShadow);
       return BoxDecoration(
         color: const Color(0xFF8D6E63),
         borderRadius: BorderRadius.circular(8),
-        boxShadow: folderShadow != null
-            ? [..._shadow(), folderShadow]
-            : _shadow(),
+        boxShadow: [basicShadow],
       );
     }
 
     return BoxDecoration(
       color: Colors.white,
       borderRadius: BorderRadius.circular(8),
-      boxShadow: folderShadow != null
-          ? [..._shadow(), folderShadow]
-          : _shadow(),
+      boxShadow: [basicShadow],
     );
   }
 
-  BoxDecoration _grad(List<Color> colors, BoxShadow? folderShadow) =>
-      BoxDecoration(
-        gradient: LinearGradient(
-          colors: colors,
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-        ),
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: folderShadow != null
-            ? [..._shadow(), folderShadow]
-            : _shadow(),
-      );
-
-  List<BoxShadow> _shadow() => const [
-    BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 2)),
-  ];
+  BoxDecoration _grad(List<Color> colors, BoxShadow shadow) => BoxDecoration(
+    gradient: LinearGradient(
+      colors: colors,
+      begin: Alignment.topLeft,
+      end: Alignment.bottomRight,
+    ),
+    borderRadius: BorderRadius.circular(8),
+    boxShadow: [shadow],
+  );
 
   Widget _buildLeftIndicator(Task task, bool isSelected, int tabIndex) {
     if (isSelected) {
@@ -1883,68 +1951,71 @@ class _RomanHomePageState extends State<RomanHomePage>
         behavior: HitTestBehavior.translucent,
         onTap: () => _toggleSelection(task.id),
         child: Container(
-          width: 50,
-          color: Colors.transparent,
+          width: 30,
+          height: 30,
           alignment: Alignment.center,
-          child: Container(
-            width: 30,
-            height: 30,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: Colors.black,
-              borderRadius: BorderRadius.circular(4),
-              boxShadow: const [
-                BoxShadow(
-                  color: Colors.black12,
-                  blurRadius: 2,
-                  offset: Offset(0, 1),
-                ),
-              ],
-            ),
-            child: const Icon(Icons.swap_horiz, size: 20, color: Colors.white),
+          decoration: BoxDecoration(
+            color: Colors.black,
+            borderRadius: BorderRadius.circular(4),
+            boxShadow: const [
+              BoxShadow(
+                color: Colors.black12,
+                blurRadius: 2,
+                offset: Offset(0, 1),
+              ),
+            ],
           ),
+          child: const Icon(Icons.swap_horiz, size: 20, color: Colors.white),
         ),
       );
     }
 
     if (task.isFolder) {
+      IconData? folderOverlayIcon;
+      if (tabIndex == 0) folderOverlayIcon = Icons.close;
+      if (tabIndex == 2) folderOverlayIcon = Icons.check;
+
       return GestureDetector(
         behavior: HitTestBehavior.translucent,
         onTap: () => _toggleSelection(task.id),
-        child: Container(
-          width: 50,
-          alignment: Alignment.center,
-          child: SizedBox(
-            width: 24,
-            height: 24,
-            child: Stack(
-              children: [
-                Container(
+        child: SizedBox(
+          width: 24,
+          height: 24,
+          child: Stack(
+            children: [
+              Container(
+                decoration: BoxDecoration(
+                  border: Border.all(
+                    color: Colors.grey.withOpacity(0.5),
+                    width: 2,
+                  ),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+              ),
+              Positioned(
+                top: 0,
+                left: 0,
+                child: Container(
+                  width: 10,
+                  height: 6,
                   decoration: BoxDecoration(
-                    border: Border.all(
-                      color: Colors.grey.withOpacity(0.5),
-                      width: 2,
-                    ),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                ),
-                Positioned(
-                  top: 0,
-                  left: 0,
-                  child: Container(
-                    width: 10,
-                    height: 6,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.withOpacity(0.5),
-                      borderRadius: const BorderRadius.only(
-                        topLeft: Radius.circular(3),
-                        bottomRight: Radius.circular(3),
-                      ),
+                    color: Colors.grey.withOpacity(0.5),
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(3),
+                      bottomRight: Radius.circular(3),
                     ),
                   ),
                 ),
-              ],
-            ),
+              ),
+              if (folderOverlayIcon != null)
+                Center(
+                  child: Icon(
+                    folderOverlayIcon,
+                    size: 16,
+                    color: Colors.grey.withOpacity(0.8),
+                  ),
+                ),
+            ],
           ),
         ),
       );
@@ -1988,12 +2059,7 @@ class _RomanHomePageState extends State<RomanHomePage>
       return GestureDetector(
         behavior: HitTestBehavior.translucent,
         onTap: () => _toggleSelection(task.id),
-        child: Container(
-          width: 50,
-          color: Colors.transparent,
-          alignment: Alignment.center,
-          child: iconWidget,
-        ),
+        child: iconWidget,
       );
     }
   }
