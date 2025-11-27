@@ -7,7 +7,6 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
-// --- БЛОК ЗАГРУЗКИ КЛЮЧА С ОТЛАДКОЙ ---
 val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
 
@@ -27,7 +26,6 @@ if (keystorePropertiesFile.exists()) {
     println("❌ ОШИБКА: Файл key.properties НЕ НАЙДЕН по этому пути!")
 }
 println("------------------------")
-// ---------------------------------------
 
 android {
     namespace = "ru.gorelovra.tdlroman"
@@ -37,6 +35,7 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        isCoreLibraryDesugaringEnabled = true
     }
 
     kotlinOptions {
@@ -49,6 +48,7 @@ android {
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
+        multiDexEnabled = true
     }
 
     signingConfigs {
@@ -64,8 +64,6 @@ android {
                 storeFile = file(sFile)
                 storePassword = sPassword
             } else {
-                // Если данных нет, подставляем пустышки, чтобы сборка не падала мгновенно,
-                // а мы увидели логи выше. Но сама подпись не сработает.
                 storePassword = "error"
                 keyPassword = "error"
             }
@@ -84,4 +82,8 @@ android {
 
 flutter {
     source = "../.."
+}
+
+dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.0.4")
 }

@@ -5,14 +5,21 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:uuid/uuid.dart';
 import 'package:flutter_rustore_update/flutter_rustore_update.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
-import 'package:visibility_detector/visibility_detector.dart';
+
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/data/latest_all.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+
+import 'widgets.dart';
+import 'dialogs.dart';
+
+final FlutterLocalNotificationsPlugin flutterLocalNotificationsPlugin =
+    FlutterLocalNotificationsPlugin();
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -31,232 +38,39 @@ void main() async {
     ),
   );
 
-  runApp(const TdlRomanApp());
+  await _initNotifications();
+
+  runApp(const TdlRomanApp(home: RomanHomePage()));
 }
 
-// --- HIVE MODEL ---
-class Task extends HiveObject {
-  String id;
-  String title;
-  bool isCompleted;
-  bool isDeleted;
-  DateTime createdAt;
-  int urgency;
-  int importance;
-  int sortIndex;
+Future<void> _initNotifications() async {
+  tz.initializeTimeZones();
 
-  bool isFolder;
-  String? parentId;
+  const AndroidInitializationSettings initializationSettingsAndroid =
+      AndroidInitializationSettings('@mipmap/ic_launcher');
 
-  Task({
-    required this.id,
-    required this.title,
-    this.isCompleted = false,
-    this.isDeleted = false,
-    required this.createdAt,
-    this.urgency = 1,
-    this.importance = 1,
-    this.sortIndex = 0,
-    this.isFolder = false,
-    this.parentId,
-  });
-
-  Map<String, dynamic> toJson() => {
-    'id': id,
-    'title': title,
-    'isCompleted': isCompleted,
-    'isDeleted': isDeleted,
-    'createdAt': createdAt.millisecondsSinceEpoch,
-    'urgency': urgency,
-    'importance': importance,
-    'sortIndex': sortIndex,
-    'isFolder': isFolder,
-    'parentId': parentId,
-  };
-}
-
-class TaskAdapter extends TypeAdapter<Task> {
-  @override
-  final int typeId = 0;
-
-  @override
-  Task read(BinaryReader reader) {
-    final id = reader.readString();
-    final title = reader.readString();
-    final isCompleted = reader.readBool();
-    final isDeleted = reader.readBool();
-    final createdAt = DateTime.fromMillisecondsSinceEpoch(reader.readInt());
-    final urgency = reader.readInt();
-    final importance = reader.readInt();
-    final sortIndex = reader.availableBytes > 0 ? reader.readInt() : 0;
-
-    final isFolder = reader.availableBytes > 0 ? reader.readBool() : false;
-    String? parentId;
-    if (reader.availableBytes > 0) {
-      try {
-        parentId = reader.readString();
-        if (parentId.isEmpty) parentId = null;
-      } catch (e) {
-        parentId = null;
-      }
-    }
-
-    return Task(
-      id: id,
-      title: title,
-      isCompleted: isCompleted,
-      isDeleted: isDeleted,
-      createdAt: createdAt,
-      urgency: urgency,
-      importance: importance,
-      sortIndex: sortIndex,
-      isFolder: isFolder,
-      parentId: parentId,
-    );
-  }
-
-  @override
-  void write(BinaryWriter writer, Task obj) {
-    writer.writeString(obj.id);
-    writer.writeString(obj.title);
-    writer.writeBool(obj.isCompleted);
-    writer.writeBool(obj.isDeleted);
-    writer.writeInt(obj.createdAt.millisecondsSinceEpoch);
-    writer.writeInt(obj.urgency);
-    writer.writeInt(obj.importance);
-    writer.writeInt(obj.sortIndex);
-    writer.writeBool(obj.isFolder);
-    writer.writeString(obj.parentId ?? "");
-  }
-}
-
-// --- APP WIDGET ---
-class TdlRomanApp extends StatelessWidget {
-  const TdlRomanApp({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'TDL-Roman',
-      debugShowCheckedModeBanner: false,
-      localizationsDelegates: const [
-        GlobalMaterialLocalizations.delegate,
-        GlobalWidgetsLocalizations.delegate,
-        GlobalCupertinoLocalizations.delegate,
-      ],
-      supportedLocales: const [Locale('ru', 'RU')],
-      locale: const Locale('ru', 'RU'),
-      theme: ThemeData(
-        fontFamily: 'Helvetica',
-        useMaterial3: true,
-        scaffoldBackgroundColor: const Color(0xFFF5F5F5),
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.black),
-      ),
-      home: const SplashScreen(),
-    );
-  }
-}
-
-// --- SPLASH SCREEN ---
-class SplashScreen extends StatefulWidget {
-  const SplashScreen({super.key});
-
-  @override
-  State<SplashScreen> createState() => _SplashScreenState();
-}
-
-class _SplashScreenState extends State<SplashScreen> {
-  String _version = '';
-
-  @override
-  void initState() {
-    super.initState();
-    _loadVersion();
-    _navigateToHome();
-  }
-
-  Future<void> _loadVersion() async {
-    final info = await PackageInfo.fromPlatform();
-    if (mounted) {
-      setState(() {
-        _version = "v${info.version}";
-      });
-    }
-  }
-
-  Future<void> _navigateToHome() async {
-    await Future.delayed(const Duration(seconds: 2));
-    if (mounted) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (context) => const RomanHomePage()),
+  final DarwinInitializationSettings initializationSettingsDarwin =
+      DarwinInitializationSettings(
+        requestAlertPermission: true,
+        requestBadgePermission: true,
+        requestSoundPermission: true,
       );
-    }
-  }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.white,
-      body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Container(
-              width: 100,
-              height: 100,
-              decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(20),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Colors.black26,
-                    blurRadius: 10,
-                    offset: Offset(0, 5),
-                  ),
-                ],
-              ),
-              child: const Icon(
-                Icons.account_balance,
-                color: Colors.white,
-                size: 60,
-              ),
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              "TDL-ROMAN",
-              style: TextStyle(
-                fontSize: 24,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 2.0,
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              "ACTA NON VERBA",
-              style: TextStyle(
-                fontSize: 12,
-                color: Colors.grey,
-                fontStyle: FontStyle.italic,
-                letterSpacing: 1.5,
-              ),
-            ),
-            const SizedBox(height: 40),
-            Text(
-              _version,
-              style: const TextStyle(
-                fontSize: 14,
-                color: Colors.black54,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  final InitializationSettings initializationSettings = InitializationSettings(
+    android: initializationSettingsAndroid,
+    iOS: initializationSettingsDarwin,
+  );
+
+  await flutterLocalNotificationsPlugin.initialize(initializationSettings);
+
+  final platform = flutterLocalNotificationsPlugin
+      .resolvePlatformSpecificImplementation<
+        AndroidFlutterLocalNotificationsPlugin
+      >();
+  await platform?.requestNotificationsPermission();
+  await platform?.requestExactAlarmsPermission();
 }
 
-// --- HOME PAGE ---
 class RomanHomePage extends StatefulWidget {
   const RomanHomePage({super.key});
 
@@ -268,8 +82,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   late Box<Task> _box;
-  final ScrollController _scrollController =
-      ScrollController(); // Добавлен контроллер
+  final ScrollController _scrollController = ScrollController();
 
   int _currentIndex = 1;
 
@@ -288,6 +101,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     _box = Hive.box<Task>('tasksBox');
 
     _fixOrphans();
+    _scheduleDailyNotification();
 
     _tabController.addListener(() {
       if (_tabController.indexIsChanging ||
@@ -312,7 +126,56 @@ class _RomanHomePageState extends State<RomanHomePage>
     super.dispose();
   }
 
-  // --- LOGIC METHODS ---
+  void _scheduleDailyNotification() async {
+    final activeTasks = _box.values
+        .where((t) => !t.isDeleted && !t.isCompleted && t.parentId == null)
+        .toList();
+
+    if (activeTasks.isEmpty) {
+      await flutterLocalNotificationsPlugin.cancel(0);
+      return;
+    }
+
+    activeTasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+    final topTask = activeTasks.first;
+
+    await flutterLocalNotificationsPlugin.cancel(0);
+
+    final now = tz.TZDateTime.now(tz.local);
+    var scheduledDate = tz.TZDateTime(
+      tz.local,
+      now.year,
+      now.month,
+      now.day,
+      9,
+      0,
+    );
+
+    if (scheduledDate.isBefore(now)) {
+      scheduledDate = scheduledDate.add(const Duration(days: 1));
+    }
+
+    await flutterLocalNotificationsPlugin.zonedSchedule(
+      0,
+      'Начни день с главного',
+      topTask.title,
+      scheduledDate,
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'daily_top_task',
+          'Главная задача',
+          channelDescription: 'Утреннее уведомление о верхней задаче',
+          importance: Importance.max,
+          priority: Priority.high,
+        ),
+        iOS: DarwinNotificationDetails(),
+      ),
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents: DateTimeComponents.time,
+    );
+  }
 
   void _fixOrphans() {
     final allTasks = _box.values;
@@ -381,9 +244,11 @@ class _RomanHomePageState extends State<RomanHomePage>
         });
   }
 
-  void _performUpdate() {
-    _showTopToast("Запуск RuStore...");
+  void _performUpdate() async {
+    _showTopToast("Создание резервной копии...");
+    await _backupData();
 
+    _showTopToast("Запуск RuStore...");
     RustoreUpdateClient.download()
         .then((value) {
           if (value != -1) {
@@ -403,51 +268,24 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   void _showTopToast(String message) {
     _toastEntry?.remove();
-    _toastEntry = OverlayEntry(
-      builder: (context) => Positioned(
-        top: 60,
-        left: 20,
-        right: 20,
-        child: Material(
-          color: Colors.transparent,
-          child: Align(
-            alignment: Alignment.topCenter,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-              decoration: BoxDecoration(
-                color: Colors.black.withOpacity(0.9),
-                borderRadius: BorderRadius.circular(24),
-                boxShadow: const [
-                  BoxShadow(
-                    color: Colors.black26,
-                    blurRadius: 10,
-                    offset: Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Text(
-                message,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-            ),
-          ),
-        ),
+
+    OverlayEntry? thisEntry;
+
+    thisEntry = OverlayEntry(
+      builder: (context) => _ToastWidget(
+        message: message,
+        onDismiss: () {
+          thisEntry?.remove();
+          if (_toastEntry == thisEntry) {
+            _toastEntry = null;
+          }
+        },
       ),
     );
 
-    Overlay.of(context).insert(_toastEntry!);
-    Future.delayed(const Duration(seconds: 2), () {
-      _toastEntry?.remove();
-      _toastEntry = null;
-    });
+    _toastEntry = thisEntry;
+    Overlay.of(context).insert(thisEntry);
   }
-
-  // --- PARSER & DUPLICATE LOGIC ---
 
   Future<void> _handlePasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -466,18 +304,16 @@ class _RomanHomePageState extends State<RomanHomePage>
       return;
     }
 
-    // Разбиваем по переносам строк (поддержка Windows/Unix)
     final lines = text.split(RegExp(r'\r?\n'));
 
     final rootRegex = RegExp(r'^(\d+)\.\s*(.*)');
     final childRegex = RegExp(r'^(\d+)\.(\d+)\.\s*(.*)');
 
-    List<_TempTask> roots = [];
-    _TempTask? currentRoot;
-    _TempTask? currentChild;
+    List<TempTask> roots = [];
+    TempTask? currentRoot;
+    TempTask? currentChild;
 
     for (var line in lines) {
-      // НЕ делаем trim() всей строки сразу, чтобы не ломать структуру, но для определения типа - делаем
       String trimmedLine = line.trim();
       if (trimmedLine.isEmpty) continue;
 
@@ -485,7 +321,7 @@ class _RomanHomePageState extends State<RomanHomePage>
       if (childMatch != null) {
         if (currentRoot == null) continue;
         String rawTitle = childMatch.group(3) ?? "";
-        _TempTask child = _parseStyle(rawTitle);
+        TempTask child = _parseStyle(rawTitle);
         currentRoot.children.add(child);
         currentChild = child;
         continue;
@@ -498,7 +334,7 @@ class _RomanHomePageState extends State<RomanHomePage>
           return;
         }
         String rawTitle = rootMatch.group(2) ?? "";
-        _TempTask root = _parseStyle(rawTitle);
+        TempTask root = _parseStyle(rawTitle);
         root.isFolder = false;
         roots.add(root);
         currentRoot = root;
@@ -506,7 +342,6 @@ class _RomanHomePageState extends State<RomanHomePage>
         continue;
       }
 
-      // ЛОГИКА СКЛЕЙКИ (многострочные задачи)
       if (currentChild != null) {
         currentChild.title += "\n$trimmedLine";
         _reparseStyles(currentChild);
@@ -517,7 +352,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     }
 
     if (roots.isEmpty) {
-      _TempTask root = _parseStyle(text.trim());
+      TempTask root = _parseStyle(text.trim());
       roots.add(root);
     }
 
@@ -529,7 +364,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     final candidate = roots.first;
     if (candidate.children.isNotEmpty) candidate.isFolder = true;
 
-    // МЯГКАЯ ПРОВЕРКА ДУБЛИКАТОВ
     final duplicate = _box.values.firstWhere(
       (t) =>
           t.title == candidate.title &&
@@ -548,9 +382,9 @@ class _RomanHomePageState extends State<RomanHomePage>
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: Colors.white,
-          title: const Text("Найден дубликат"),
+          title: const Text("Обнаружены дубликаты"),
           content: const Text(
-            "Такая задача или папка уже существует.\nЯ подсветил её в списке.\n\nВсё равно создать копию?",
+            "Такая задача уже есть, я подсветил её.\nВсё равно создать?",
           ),
           actions: [
             TextButton(
@@ -560,7 +394,7 @@ class _RomanHomePageState extends State<RomanHomePage>
             TextButton(
               onPressed: () => Navigator.pop(ctx, true),
               child: const Text(
-                "Создать копию",
+                "Дублировать",
                 style: TextStyle(
                   color: Colors.red,
                   fontWeight: FontWeight.bold,
@@ -574,11 +408,10 @@ class _RomanHomePageState extends State<RomanHomePage>
       if (shouldCreate != true) return;
     }
 
-    _showSandboxDialog(candidate);
+    showSandboxDialog(context, tempRoot: candidate, onImport: _importTask);
   }
 
   void _scrollToTask(Task target) {
-    // Если папка закрыта - открываем
     if (target.parentId != null) {
       if (!_openFolders.contains(target.parentId!)) {
         setState(() {
@@ -587,7 +420,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       }
     }
 
-    // Вычисляем позицию
     final flatList = _buildHierarchicalList(
       (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
       (t) => !t.isDeleted,
@@ -596,25 +428,30 @@ class _RomanHomePageState extends State<RomanHomePage>
     final index = flatList.indexWhere((t) => t.id == target.id);
 
     if (index != -1 && _scrollController.hasClients) {
-      double offset = index * 60.0; // Примерная высота
-      if (offset > _scrollController.position.maxScrollExtent) {
-        offset = _scrollController.position.maxScrollExtent;
-      }
+      double offset = index * 60.0;
+      double maxScroll = _scrollController.position.maxScrollExtent;
+      double viewport = _scrollController.position.viewportDimension;
+
+      double targetOffset = offset - (viewport / 2) + 30;
+
+      if (targetOffset < 0) targetOffset = 0;
+      if (targetOffset > maxScroll) targetOffset = maxScroll;
+
       _scrollController.animateTo(
-        offset,
+        targetOffset,
         duration: const Duration(milliseconds: 500),
         curve: Curves.easeInOut,
       );
     }
   }
 
-  _TempTask _parseStyle(String raw) {
-    var t = _TempTask(title: raw, urgency: 1, importance: 1);
+  TempTask _parseStyle(String raw) {
+    var t = TempTask(title: raw, urgency: 1, importance: 1);
     _reparseStyles(t);
     return t;
   }
 
-  void _reparseStyles(_TempTask task) {
+  void _reparseStyles(TempTask task) {
     String t = task.title.trim();
     int u = 1;
     int i = 1;
@@ -636,102 +473,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     task.importance = i;
   }
 
-  void _showSandboxDialog(_TempTask tempRoot) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: Colors.white,
-          contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 0),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  _buildSandboxItem(tempRoot, isRoot: true),
-                  if (tempRoot.children.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 16.0, top: 8),
-                      child: Column(
-                        children: tempRoot.children
-                            .map((c) => _buildSandboxItem(c, isRoot: false))
-                            .toList(),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text("Отмена", style: TextStyle(color: Colors.grey)),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.pop(ctx);
-                _importTask(tempRoot);
-              },
-              child: const Text(
-                "Импорт",
-                style: TextStyle(
-                  color: Colors.black,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  Widget _buildSandboxItem(_TempTask task, {required bool isRoot}) {
-    Color color = Colors.black87;
-    FontWeight fw = FontWeight.normal;
-
-    if (task.urgency == 2) color = const Color(0xFFD32F2F);
-    if (task.importance == 2) fw = FontWeight.bold;
-
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      padding: const EdgeInsets.all(8),
-      decoration: BoxDecoration(
-        border: Border.all(color: Colors.grey.withOpacity(0.3)),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        children: [
-          if (isRoot && task.isFolder)
-            const Padding(
-              padding: EdgeInsets.only(right: 8),
-              child: Icon(Icons.folder_outlined, size: 20),
-            ),
-          Expanded(
-            child: Text(
-              task.title,
-              style: TextStyle(color: color, fontWeight: fw, fontSize: 16),
-            ),
-          ),
-          if (task.urgency == 2)
-            const Padding(
-              padding: EdgeInsets.only(left: 4),
-              child: Icon(Icons.bolt, size: 16, color: Colors.red),
-            ),
-          if (task.importance == 2)
-            const Padding(
-              padding: EdgeInsets.only(left: 4),
-              child: Icon(Icons.priority_high, size: 16, color: Colors.orange),
-            ),
-        ],
-      ),
-    );
-  }
-
-  void _importTask(_TempTask root) {
+  void _importTask(TempTask root) {
     int newIndex;
     if (root.urgency == 2) {
       newIndex = _getTargetIndexForUrgentBottom();
@@ -774,14 +516,13 @@ class _RomanHomePageState extends State<RomanHomePage>
     _highlightTaskId = rootId;
     _triggerBlink();
     setState(() {});
+    _scheduleDailyNotification();
     _showTopToast("Импортировано!");
   }
 
   void _triggerBlink() {
     setState(() {});
   }
-
-  // --- COUNTERS & LIST LOGIC ---
 
   int _countActive() {
     int count = 0;
@@ -1127,7 +868,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                   if (!task.isDeleted && !task.isCompleted)
                     _buildCopyActionButton("РЕДАКТИРОВАТЬ", Icons.edit, () {
                       Navigator.pop(ctx);
-                      _showTaskDialog(context, task: task);
+                      _showTaskDialogWrapped(task: task);
                     }),
                   _buildCopyActionButton("КОПИРОВАТЬ", Icons.copy, () {
                     Navigator.pop(ctx);
@@ -1364,6 +1105,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     _box.put(newTask.id, newTask);
 
     _highlightTaskId = newTask.id;
+    _scheduleDailyNotification();
 
     setState(() {});
   }
@@ -1425,6 +1167,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     }
 
     task.save();
+    _scheduleDailyNotification();
     setState(() {});
   }
 
@@ -1439,6 +1182,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     }
 
     task.save();
+    _scheduleDailyNotification();
     setState(() {});
   }
 
@@ -1465,6 +1209,7 @@ class _RomanHomePageState extends State<RomanHomePage>
     _highlightTaskId = task.id;
 
     task.save();
+    _scheduleDailyNotification();
     setState(() {});
   }
 
@@ -1476,6 +1221,7 @@ class _RomanHomePageState extends State<RomanHomePage>
 
     _highlightTaskId = task.id;
     task.save();
+    _scheduleDailyNotification();
     setState(() {});
   }
 
@@ -1487,6 +1233,7 @@ class _RomanHomePageState extends State<RomanHomePage>
       }
     }
     await task.delete();
+    _scheduleDailyNotification();
     setState(() {});
   }
 
@@ -1608,6 +1355,7 @@ class _RomanHomePageState extends State<RomanHomePage>
       counters[pid] = currentIndex + 1;
     }
 
+    _scheduleDailyNotification();
     setState(() {});
   }
 
@@ -1645,9 +1393,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                 unselectedLabelColor: _currentIndex == 2
                     ? Colors.white38
                     : Colors.black38,
-                onTap: (index) {
-                  // Перехватываем стандартный onTap в _buildTab
-                },
+                onTap: (index) {},
                 tabs: [
                   _buildTab(Icons.delete_outline, _countDeletedRoots(), 0),
                   _buildTab(Icons.list_alt, _countActive(), 1),
@@ -1692,8 +1438,7 @@ class _RomanHomePageState extends State<RomanHomePage>
                     if (_openFolders.isNotEmpty) {
                       targetFolderId = _openFolders.first;
                     }
-                    _showTaskDialog(
-                      context,
+                    _showTaskDialogWrapped(
                       task: null,
                       parentId: targetFolderId,
                     );
@@ -1970,7 +1715,12 @@ class _RomanHomePageState extends State<RomanHomePage>
       physics: const BouncingScrollPhysics(
         parent: AlwaysScrollableScrollPhysics(),
       ),
-      padding: const EdgeInsets.fromLTRB(0, 10, 0, 80),
+      padding: EdgeInsets.fromLTRB(
+        0,
+        10,
+        0,
+        MediaQuery.of(context).size.height * 0.5,
+      ),
       itemCount: flatList.length,
       onReorder: _onReorder,
       proxyDecorator: (child, index, animation) =>
@@ -2007,7 +1757,12 @@ class _RomanHomePageState extends State<RomanHomePage>
     return ListView.builder(
       controller: _scrollController,
       physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.symmetric(vertical: 10),
+      padding: EdgeInsets.fromLTRB(
+        0,
+        10,
+        0,
+        MediaQuery.of(context).size.height * 0.5,
+      ),
       itemCount: flatList.length,
       itemBuilder: (context, index) {
         bool showCup = (_currentIndex == 2);
@@ -2025,523 +1780,36 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  void _showTaskDialog(BuildContext context, {Task? task, String? parentId}) {
-    final titleController = TextEditingController(text: task?.title ?? '');
-    int urgency = task?.urgency ?? 1;
-    int importance = task?.importance ?? 1;
-    int positionMode = task == null ? 2 : 1;
-    bool isFolder = task?.isFolder ?? false;
-    bool attentionTop = false;
-    int blinkStage = 0;
-    Timer? attentionTimer;
-
-    if (parentId != null) isFolder = false;
-
-    bool hasChildren = false;
-    if (task != null) {
-      hasChildren = _box.values.any(
-        (t) => t.parentId == task.id && !t.isDeleted,
-      );
-    }
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        final double dialogHeight = MediaQuery.of(context).size.height * 0.72;
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            void selectPosition(int mode) {
-              attentionTimer?.cancel();
-              setDialogState(() {
-                positionMode = mode;
-                attentionTop = false;
-              });
-            }
-
-            void triggerAttention() {
-              attentionTimer?.cancel();
-              setDialogState(() {
-                positionMode = 0;
-                attentionTop = true;
-                blinkStage = 1;
-              });
-              int count = 0;
-              attentionTimer = Timer.periodic(
-                const Duration(milliseconds: 200),
-                (timer) {
-                  if (!ctx.mounted) {
-                    timer.cancel();
-                    return;
-                  }
-                  setDialogState(() {
-                    blinkStage = (blinkStage == 0) ? 1 : 0;
-                  });
-                  count++;
-                  if (count >= 6) {
-                    timer.cancel();
-                    setDialogState(() => attentionTop = false);
-                  }
-                },
-              );
-            }
-
-            void save() {
-              if (titleController.text.trim().isNotEmpty) {
-                attentionTimer?.cancel();
-                if (task == null) {
-                  _saveNewTask(
-                    titleController.text,
-                    urgency,
-                    importance,
-                    positionMode,
-                    isFolder,
-                    parentId,
-                  );
-                } else {
-                  task.title = titleController.text;
-                  task.isFolder = isFolder;
-                  _updateTaskAndMove(task, urgency, importance, positionMode);
-                }
-                Navigator.pop(ctx);
-              }
-            }
-
-            return Dialog(
-              shape: const RoundedRectangleBorder(
-                borderRadius: BorderRadius.zero,
-              ),
-              backgroundColor: Colors.white,
-              insetPadding: const EdgeInsets.symmetric(
-                horizontal: 12,
-                vertical: 24,
-              ),
-              child: SizedBox(
-                height: dialogHeight,
-                width: double.maxFinite,
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: Container(
-                          decoration: BoxDecoration(
-                            border: Border.all(
-                              color: Colors.grey.shade300,
-                              width: 2,
-                            ),
-                            borderRadius: BorderRadius.circular(4),
-                          ),
-                          padding: const EdgeInsets.symmetric(horizontal: 8),
-                          child: Scrollbar(
-                            child: TextField(
-                              controller: titleController,
-                              autofocus: true,
-                              style: const TextStyle(
-                                fontSize: 18,
-                                color: Colors.black87,
-                              ),
-                              decoration: const InputDecoration(
-                                hintText: 'Что нужно сделать?',
-                                border: InputBorder.none,
-                              ),
-                              maxLines: null,
-                              expands: true,
-                              textAlignVertical: TextAlignVertical.top,
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                        height: 170,
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.end,
-                          children: [
-                            Expanded(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  Row(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      if ((task == null ||
-                                              task.parentId == null) &&
-                                          parentId == null)
-                                        Padding(
-                                          padding: const EdgeInsets.only(
-                                            right: 20,
-                                          ),
-                                          child: _buildDialogFolderButton(
-                                            isFolder,
-                                            hasChildren,
-                                            () {
-                                              if (hasChildren) {
-                                                _showTopToast(
-                                                  "Сначала очистите папку",
-                                                );
-                                                return;
-                                              }
-                                              setDialogState(
-                                                () => isFolder = !isFolder,
-                                              );
-                                            },
-                                          ),
-                                        ),
-                                      _buildDialogStateButton(
-                                        Icons.bolt,
-                                        "Срочно",
-                                        urgency == 2,
-                                        Colors.red,
-                                        () {
-                                          setDialogState(() {
-                                            urgency = (urgency == 1 ? 2 : 1);
-                                            if (urgency == 2)
-                                              triggerAttention();
-                                          });
-                                        },
-                                      ),
-                                      const SizedBox(width: 20),
-                                      _buildDialogStateButton(
-                                        Icons.priority_high,
-                                        "Важно",
-                                        importance == 2,
-                                        Colors.orange,
-                                        () {
-                                          setDialogState(() {
-                                            importance = (importance == 1
-                                                ? 2
-                                                : 1);
-                                            if (importance == 2)
-                                              triggerAttention();
-                                          });
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceEvenly,
-                                    children: [
-                                      _buildSquareButtonWithLabel(
-                                        label: "Отмена",
-                                        icon: Icons.close,
-                                        color: Colors.grey,
-                                        size: 50,
-                                        onTap: () {
-                                          attentionTimer?.cancel();
-                                          Navigator.pop(ctx);
-                                        },
-                                      ),
-                                      _buildSquareButtonWithLabel(
-                                        label: "Копия",
-                                        icon: Icons.copy,
-                                        color: Colors.black,
-                                        size: 50,
-                                        onTap: () {
-                                          if (titleController.text
-                                              .trim()
-                                              .isNotEmpty) {
-                                            Clipboard.setData(
-                                              ClipboardData(
-                                                text: titleController.text,
-                                              ),
-                                            );
-                                            _showTopToast("Текст скопирован");
-                                          }
-                                        },
-                                      ),
-                                      _buildSquareButtonWithLabel(
-                                        label: "OK",
-                                        icon: Icons.check,
-                                        color: Colors.black,
-                                        size: 50,
-                                        onTap: save,
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(width: 10),
-                            SizedBox(
-                              width: 50,
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.end,
-                                children: [
-                                  _buildDialogPosButton(
-                                    0,
-                                    Icons.keyboard_arrow_up,
-                                    positionMode,
-                                    attentionTop,
-                                    blinkStage,
-                                    () => selectPosition(0),
-                                  ),
-                                  _buildDialogPosButton(
-                                    1,
-                                    Icons.stop,
-                                    positionMode,
-                                    attentionTop,
-                                    blinkStage,
-                                    () => selectPosition(1),
-                                  ),
-                                  _buildDialogPosButton(
-                                    2,
-                                    Icons.keyboard_arrow_down,
-                                    positionMode,
-                                    attentionTop,
-                                    blinkStage,
-                                    () => selectPosition(2),
-                                  ),
-                                  const SizedBox(height: 4),
-                                  const Text(
-                                    "Позиция",
-                                    style: TextStyle(
-                                      fontSize: 10,
-                                      color: Colors.grey,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 18),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildDialogFolderButton(
-    bool isFolder,
-    bool isLocked,
-    VoidCallback onTap,
-  ) {
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.lightImpact();
-        onTap();
-      },
-      child: Column(
-        children: [
-          Container(
-            width: 45,
-            height: 45,
-            alignment: Alignment.center,
-            child: SizedBox(
-              width: 26,
-              height: 26,
-              child: Stack(
-                children: [
-                  Container(
-                    decoration: BoxDecoration(
-                      color: isFolder ? Colors.black : Colors.transparent,
-                      border: Border.all(
-                        color: isFolder
-                            ? Colors.black
-                            : Colors.grey.withOpacity(0.5),
-                        width: 2,
-                      ),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                  ),
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    child: Container(
-                      width: 11,
-                      height: 7,
-                      decoration: BoxDecoration(
-                        color: isFolder
-                            ? Colors.black
-                            : Colors.grey.withOpacity(0.5),
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(3),
-                          bottomRight: Radius.circular(3),
-                        ),
-                      ),
-                    ),
-                  ),
-                  if (isFolder)
-                    const Center(
-                      child: Icon(Icons.check, size: 18, color: Colors.white),
-                    ),
-                  if (isLocked)
-                    Center(
-                      child: Container(
-                        padding: const EdgeInsets.all(2),
-                        decoration: const BoxDecoration(
-                          color: Colors.white,
-                          shape: BoxShape.circle,
-                        ),
-                        child: const Icon(
-                          Icons.lock,
-                          size: 14,
-                          color: Colors.black,
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            "Папка",
-            style: TextStyle(
-              fontSize: 10,
-              color: isFolder ? Colors.black : Colors.grey,
-              fontWeight: isFolder ? FontWeight.bold : FontWeight.normal,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDialogStateButton(
-    IconData icon,
-    String label,
-    bool isActive,
-    Color activeColor,
-    VoidCallback onTap,
-  ) {
-    return GestureDetector(
-      onTap: () {
-        HapticFeedback.lightImpact();
-        onTap();
-      },
-      child: Column(
-        children: [
-          AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            width: 45,
-            height: 45,
-            decoration: BoxDecoration(
-              color: Colors.transparent,
-              shape: BoxShape.circle,
-              border: Border.all(
-                color: isActive ? activeColor : Colors.grey.withOpacity(0.3),
-                width: 2,
-              ),
-            ),
-            child: Icon(
-              icon,
-              color: isActive ? activeColor : Colors.grey.withOpacity(0.3),
-              size: 26,
-            ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: 10,
-              color: isActive ? activeColor : Colors.grey,
-              fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildDialogPosButton(
-    int mode,
-    IconData icon,
-    int currentMode,
-    bool attention,
-    int blinkStage,
-    VoidCallback onTap,
-  ) {
-    bool isSel = currentMode == mode;
-    bool isBlinking = (mode == 0 && attention);
-    Color borderColor;
-    Color iconColor;
-    Color bgColor;
-    if (isBlinking) {
-      if (blinkStage == 1) {
-        borderColor = Colors.red;
-        iconColor = Colors.red;
-        bgColor = Colors.red.withOpacity(0.1);
-      } else {
-        borderColor = Colors.blue;
-        iconColor = Colors.blue;
-        bgColor = Colors.blue.withOpacity(0.1);
-      }
-    } else if (isSel) {
-      borderColor = Colors.blue;
-      iconColor = Colors.blue;
-      bgColor = Colors.blue.withOpacity(0.1);
-    } else {
-      borderColor = Colors.grey.withOpacity(0.3);
-      iconColor = Colors.grey.withOpacity(0.3);
-      bgColor = Colors.transparent;
-    }
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 2),
-        width: 45,
-        height: 38,
-        decoration: BoxDecoration(
-          border: Border.all(color: borderColor, width: 2),
-          borderRadius: BorderRadius.circular(8),
-          color: bgColor,
-        ),
-        child: Icon(icon, size: 24, color: iconColor),
-      ),
-    );
-  }
-
-  Widget _buildSquareButtonWithLabel({
-    required String label,
-    required IconData icon,
-    required Color color,
-    required double size,
-    required VoidCallback onTap,
-  }) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        SizedBox(
-          width: size,
-          height: size,
-          child: Material(
-            color: Colors.transparent,
-            child: InkWell(
-              onTap: onTap,
-              borderRadius: BorderRadius.circular(8),
-              child: Container(
-                decoration: BoxDecoration(
-                  border: Border.all(color: color, width: 2),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                alignment: Alignment.center,
-                child: Icon(icon, color: color, size: 28),
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 4),
-        Text(label, style: const TextStyle(fontSize: 10, color: Colors.grey)),
-      ],
+  void _showTaskDialogWrapped({Task? task, String? parentId}) {
+    showTaskDialog(
+      context,
+      task: task,
+      parentId: parentId,
+      box: _box,
+      onToast: _showTopToast,
+      onSaveNew: _saveNewTask,
+      onUpdate: _updateTaskAndMove,
     );
   }
 
   BoxDecoration _getTaskDecoration(Task task, int tabIndex) {
+    BoxShadow? folderShadow;
+    if (task.isFolder) {
+      folderShadow = BoxShadow(
+        color: Colors.black.withOpacity(0.2),
+        offset: const Offset(0, 4),
+        blurRadius: 0,
+        spreadRadius: -2,
+      );
+    }
+
     if (tabIndex == 0) {
       return BoxDecoration(
         color: Colors.grey[200],
         borderRadius: BorderRadius.circular(8),
-        boxShadow: _shadow(),
+        boxShadow: folderShadow != null
+            ? [..._shadow(), folderShadow]
+            : _shadow(),
       );
     }
 
@@ -2549,7 +1817,9 @@ class _RomanHomePageState extends State<RomanHomePage>
       return BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(8),
-        boxShadow: _shadow(),
+        boxShadow: folderShadow != null
+            ? [..._shadow(), folderShadow]
+            : _shadow(),
       );
     }
 
@@ -2559,42 +1829,50 @@ class _RomanHomePageState extends State<RomanHomePage>
           const Color(0xFFBF953F),
           const Color(0xFFFCF6BA),
           const Color(0xFFAA771C),
-        ]);
+        ], folderShadow);
       if (task.importance == 2)
         return _grad([
           const Color(0xFFE0E0E0),
           const Color(0xFFFFFFFF),
           const Color(0xFFAAAAAA),
-        ]);
+        ], folderShadow);
       if (task.urgency == 2)
         return _grad([
-          const Color(0xFFCD7F32),
-          const Color(0xFFFFCC99),
-          const Color(0xFFA0522D),
-        ]);
+          const Color(0xFF1A237E),
+          const Color(0xFF3949AB),
+          const Color(0xFF1A237E),
+        ], folderShadow);
       return BoxDecoration(
         color: const Color(0xFF8D6E63),
         borderRadius: BorderRadius.circular(8),
-        boxShadow: _shadow(),
+        boxShadow: folderShadow != null
+            ? [..._shadow(), folderShadow]
+            : _shadow(),
       );
     }
 
     return BoxDecoration(
       color: Colors.white,
       borderRadius: BorderRadius.circular(8),
-      boxShadow: _shadow(),
+      boxShadow: folderShadow != null
+          ? [..._shadow(), folderShadow]
+          : _shadow(),
     );
   }
 
-  BoxDecoration _grad(List<Color> colors) => BoxDecoration(
-    gradient: LinearGradient(
-      colors: colors,
-      begin: Alignment.topLeft,
-      end: Alignment.bottomRight,
-    ),
-    borderRadius: BorderRadius.circular(8),
-    boxShadow: _shadow(),
-  );
+  BoxDecoration _grad(List<Color> colors, BoxShadow? folderShadow) =>
+      BoxDecoration(
+        gradient: LinearGradient(
+          colors: colors,
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: folderShadow != null
+            ? [..._shadow(), folderShadow]
+            : _shadow(),
+      );
+
   List<BoxShadow> _shadow() => const [
     BoxShadow(color: Colors.black12, blurRadius: 3, offset: Offset(0, 2)),
   ];
@@ -2628,9 +1906,8 @@ class _RomanHomePageState extends State<RomanHomePage>
         ),
       );
     }
-    Widget iconWidget;
 
-    if (task.isFolder && tabIndex == 1) {
+    if (task.isFolder) {
       return GestureDetector(
         behavior: HitTestBehavior.translucent,
         onTap: () => _toggleSelection(task.id),
@@ -2672,6 +1949,7 @@ class _RomanHomePageState extends State<RomanHomePage>
         ),
       );
     } else {
+      Widget iconWidget;
       IconData? icon;
       if (tabIndex == 0) {
         icon = Icons.close;
@@ -2706,263 +1984,99 @@ class _RomanHomePageState extends State<RomanHomePage>
           ),
         );
       }
+
+      return GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onTap: () => _toggleSelection(task.id),
+        child: Container(
+          width: 50,
+          color: Colors.transparent,
+          alignment: Alignment.center,
+          child: iconWidget,
+        ),
+      );
     }
-    return GestureDetector(
-      behavior: HitTestBehavior.translucent,
-      onTap: () => _toggleSelection(task.id),
-      child: Container(
-        width: 50,
-        color: Colors.transparent,
-        alignment: Alignment.center,
-        child: iconWidget,
-      ),
-    );
   }
 }
 
-class TaskItemWidget extends StatefulWidget {
-  final Task task;
-  final int index;
-  final bool isExpanded;
-  final bool isSelected;
-  final bool showCup;
-  final bool shouldBlink;
-  final bool isFolderOpen;
-  final bool isMenuOpen;
-  final int tabIndex;
-  final VoidCallback onBlinkFinished;
-  final VoidCallback onToggleExpand;
-  final VoidCallback onToggleSelection;
-  final VoidCallback onMenuTap;
-  final VoidCallback onFolderTap;
-  final BoxDecoration Function(Task) decorationBuilder;
-  final Widget Function(Task, bool) indicatorBuilder;
+class _ToastWidget extends StatefulWidget {
+  final String message;
+  final VoidCallback onDismiss;
 
-  const TaskItemWidget({
-    Key? key,
-    required this.task,
-    required this.index,
-    required this.isExpanded,
-    required this.isSelected,
-    this.showCup = false,
-    this.shouldBlink = false,
-    this.isFolderOpen = false,
-    this.isMenuOpen = false,
-    required this.tabIndex,
-    required this.onBlinkFinished,
-    required this.onToggleExpand,
-    required this.onToggleSelection,
-    required this.onMenuTap,
-    required this.onFolderTap,
-    required this.decorationBuilder,
-    required this.indicatorBuilder,
-  }) : super(key: key);
+  const _ToastWidget({required this.message, required this.onDismiss});
 
   @override
-  State<TaskItemWidget> createState() => _TaskItemWidgetState();
+  State<_ToastWidget> createState() => _ToastWidgetState();
 }
 
-class _TaskItemWidgetState extends State<TaskItemWidget> {
-  bool _isHighlighed = false;
-  Timer? _blinkTimer;
-  bool _hasBlinked = false;
+class _ToastWidgetState extends State<_ToastWidget> {
+  bool _isVisible = true;
+  Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    if (widget.shouldBlink) {
-      _startBlinking();
-    }
-  }
-
-  @override
-  void didUpdateWidget(TaskItemWidget oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.shouldBlink && !oldWidget.shouldBlink) {
-      _startBlinking();
-    }
-  }
-
-  void _startBlinking() {
-    if (_blinkTimer != null || _hasBlinked) return;
-    _hasBlinked = true;
-    int count = 0;
-    _isHighlighed = true;
-    _blinkTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
-      if (!mounted) {
-        timer.cancel();
-        return;
-      }
-      setState(() {
-        _isHighlighed = !_isHighlighed;
-      });
-      count++;
-      if (count >= 10) {
-        timer.cancel();
+    _timer = Timer(const Duration(seconds: 4), () {
+      if (mounted) {
         setState(() {
-          _isHighlighed = false;
+          _isVisible = false;
         });
-        widget.onBlinkFinished();
       }
     });
   }
 
   @override
   void dispose() {
-    _blinkTimer?.cancel();
+    _timer?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    Color textColor = Colors.black87;
-    FontWeight fontWeight = FontWeight.normal;
-    TextDecoration textDecoration = TextDecoration.none;
-
-    if (widget.tabIndex == 0) {
-      textColor = Colors.grey;
-      textDecoration = TextDecoration.lineThrough;
-    } else if (widget.tabIndex == 2) {
-      if (widget.task.urgency == 1 && widget.task.importance == 1)
-        textColor = Colors.white;
-      if (widget.task.importance == 2) fontWeight = FontWeight.bold;
-    } else {
-      if (widget.task.isCompleted) {
-        textColor = Colors.grey;
-      } else {
-        if (widget.task.urgency == 2) textColor = const Color(0xFFD32F2F);
-        if (widget.task.importance == 2) fontWeight = FontWeight.bold;
-      }
-    }
-
-    BoxDecoration decoration = widget.decorationBuilder(widget.task);
-
-    if (widget.task.isFolder &&
-        !widget.task.isDeleted &&
-        !widget.task.isCompleted) {
-      decoration = decoration.copyWith(
-        boxShadow: [
-          const BoxShadow(
-            color: Colors.black12,
-            offset: Offset(3, 3),
-            blurRadius: 0,
-          ),
-          ...decoration.boxShadow ?? [],
-        ],
-      );
-    }
-
-    // ЛАКОНИЧНОЕ ВЫДЕЛЕНИЕ (СЕРЫЙ ФОН) ПРИ ОТКРЫТОМ МЕНЮ
-    if (widget.isMenuOpen) {
-      Color menuHighlight;
-      if (widget.tabIndex == 2) {
-        menuHighlight = Colors.white24;
-      } else {
-        menuHighlight = Colors.grey.shade300;
-      }
-
-      if (decoration.gradient == null) {
-        decoration = decoration.copyWith(color: menuHighlight);
-      } else {
-        decoration = decoration.copyWith(
-          border: Border.all(color: Colors.white.withOpacity(0.5), width: 2),
-        );
-      }
-    }
-
-    Color borderColor = Colors.transparent;
-    if (_isHighlighed) {
-      borderColor = Colors.red;
-    }
-
-    // Если есть выделение меню и нет мигания - оставляем стиль меню.
-    // Если идет мигание - перекрываем красной рамкой.
-    if (!_isHighlighed && widget.isMenuOpen && decoration.border != null) {
-      // no-op, используем бордер из блока isMenuOpen
-    } else {
-      decoration = decoration.copyWith(
-        border: Border.all(color: borderColor, width: 3),
-      );
-    }
-
-    EdgeInsets margin = const EdgeInsets.symmetric(vertical: 4, horizontal: 16);
-    if (widget.task.parentId != null) {
-      margin = const EdgeInsets.fromLTRB(48, 4, 16, 4);
-    }
-
-    VoidCallback onTap = widget.task.isFolder
-        ? widget.onFolderTap
-        : widget.onToggleExpand;
-
-    return Container(
-      margin: margin,
-      decoration: decoration,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(8),
-        child: Padding(
-          padding: const EdgeInsets.only(left: 16, top: 8, bottom: 8, right: 4),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(right: 12),
-                child: widget.indicatorBuilder(widget.task, widget.isSelected),
-              ),
-              Expanded(
+    return Positioned(
+      top: 60,
+      left: 20,
+      right: 20,
+      child: IgnorePointer(
+        child: AnimatedOpacity(
+          opacity: _isVisible ? 1.0 : 0.0,
+          duration: const Duration(milliseconds: 800),
+          curve: Curves.easeOut,
+          onEnd: widget.onDismiss,
+          child: Material(
+            color: Colors.transparent,
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 12,
+                ),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.9),
+                  borderRadius: BorderRadius.circular(24),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black26,
+                      blurRadius: 10,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
                 child: Text(
-                  widget.task.title,
-                  maxLines: widget.isExpanded ? null : 2,
-                  overflow: widget.isExpanded ? null : TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 18,
-                    color: textColor,
-                    height: 1.2,
-                    fontWeight: fontWeight,
-                    decoration: textDecoration,
-                    decorationColor: Colors.grey,
+                  widget.message,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
               ),
-              if (widget.showCup) ...[
-                const SizedBox(width: 8),
-                const Icon(Icons.emoji_events, color: Colors.white, size: 28),
-              ],
-              GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onTap: widget.onMenuTap,
-                child: Container(
-                  width: 40,
-                  height: 40,
-                  alignment: Alignment.center,
-                  child: Icon(
-                    Icons.more_vert,
-                    color: widget.tabIndex == 2
-                        ? Colors.white54
-                        : Colors.grey[400],
-                    size: 24,
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
       ),
     );
   }
-}
-
-class _TempTask {
-  String title;
-  int urgency;
-  int importance;
-  bool isFolder;
-  List<_TempTask> children;
-
-  _TempTask({
-    required this.title,
-    this.urgency = 1,
-    this.importance = 1,
-    this.isFolder = false,
-  }) : children = [];
 }
