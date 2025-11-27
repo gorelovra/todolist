@@ -341,6 +341,7 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
     FontWeight fontWeight = FontWeight.normal;
     TextDecoration textDecoration = TextDecoration.none;
 
+    // Logic for text color
     if (widget.tabIndex == 0) {
       textColor = Colors.grey;
       textDecoration = TextDecoration.lineThrough;
@@ -352,7 +353,8 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       if (widget.task.isCompleted) {
         textColor = Colors.grey;
       } else {
-        if (widget.task.urgency == 2) textColor = const Color(0xFF1A237E);
+        if (widget.task.urgency == 2)
+          textColor = const Color(0xFF1A237E); // Dark Blue for Urgent
         if (widget.task.importance == 2) fontWeight = FontWeight.bold;
       }
     }
@@ -381,12 +383,22 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       borderColor = Colors.red;
     }
 
+    // Apply highlighting border if needed
     if (!(_isHighlighed == false &&
         widget.isMenuOpen &&
         decoration.border != null)) {
-      decoration = decoration.copyWith(
-        border: Border.all(color: borderColor, width: 3),
-      );
+      // FIX FOR FOLDERS BORDER IN LIST:
+      // If it's a folder in Active/Deleted tabs, we might already have a border from below logic,
+      // but Blink takes precedence.
+      // If no Blink, we want to keep the "darker border" we set for folders.
+
+      if (!_isHighlighed && widget.task.isFolder && widget.tabIndex != 2) {
+        // Keep existing border from folder logic (set below) or do nothing
+      } else {
+        decoration = decoration.copyWith(
+          border: Border.all(color: borderColor, width: 3),
+        );
+      }
     }
 
     EdgeInsets margin = const EdgeInsets.symmetric(vertical: 4, horizontal: 16);
@@ -404,7 +416,8 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          crossAxisAlignment:
+              CrossAxisAlignment.start, // Align to top for multi-line
           children: [
             Padding(
               padding: const EdgeInsets.only(right: 12, top: 4),
@@ -458,81 +471,120 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       ),
     );
 
-    // --- FIX: Stack effect ONLY for Triumph (Tab 2) ---
-    bool useStackEffect = widget.task.isFolder && widget.tabIndex == 2;
+    Widget mainContainer = Container(
+      margin: margin,
+      decoration: decoration,
+      child: content,
+    );
 
-    if (useStackEffect) {
-      BoxDecoration backLayerDeco = decoration.copyWith(
-        color: decoration.color?.withOpacity(0.6),
-        boxShadow: [],
-        gradient: null,
-      );
+    // --- FOLDER STACK LOGIC ---
+    if (widget.task.isFolder) {
+      // 1. Calculate Back Layer Decoration
+      BoxDecoration backLayerDeco;
 
-      if (decoration.gradient != null) {
-        backLayerDeco = backLayerDeco.copyWith(
-          color: const Color(0xFFBF953F).withOpacity(0.5),
+      if (widget.tabIndex == 2) {
+        // Triumph (keep golden/dark stack)
+        backLayerDeco = decoration.copyWith(
+          color: decoration.color?.withOpacity(0.6),
+          boxShadow: [],
+          gradient: null,
+        );
+        if (decoration.gradient != null) {
+          backLayerDeco = backLayerDeco.copyWith(
+            color: const Color(0xFFBF953F).withOpacity(0.5),
+          );
+        }
+      } else {
+        // Active (1) or Deleted (0)
+        // Make layers distinct grey
+        Color layerColor = (widget.tabIndex == 1)
+            ? Colors
+                  .grey
+                  .shade300 // Layer for Active
+            : Colors.grey.shade400; // Layer for Deleted
+
+        backLayerDeco = BoxDecoration(
+          color: layerColor,
+          borderRadius: BorderRadius.circular(8),
+          // No border for back layers to keep it clean, or thin border
         );
       }
 
-      return VisibilityDetector(
-        key: widget.key ?? Key(widget.task.id),
-        onVisibilityChanged: (info) {
-          if (info.visibleFraction > 0.5 &&
-              widget.shouldBlink &&
-              !_hasBlinked) {
-            _startBlinking();
-          }
-        },
-        child: Container(
-          margin: margin,
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Positioned(
-                top: 4,
-                left: 0,
-                right: 0,
-                bottom: -4,
-                child: Container(
-                  decoration: backLayerDeco.copyWith(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-              ),
-              Positioned(
-                top: 2,
-                left: 0,
-                right: 0,
-                bottom: -2,
-                child: Container(
-                  decoration: backLayerDeco.copyWith(
-                    color: backLayerDeco.color?.withOpacity(0.8),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-              ),
-              Container(decoration: decoration, child: content),
-            ],
+      // 2. Adjust Top Layer Decoration for Visibility in Light Mode
+      BoxDecoration topLayerDeco = decoration;
+      if (widget.tabIndex != 2) {
+        // Apply custom fill and border for folders in light tabs
+        topLayerDeco = topLayerDeco.copyWith(
+          // Light grey fill to distinguish from white background
+          color: (widget.tabIndex == 1)
+              ? const Color(0xFFF5F5F5)
+              : Colors.grey[300],
+          // Darker border
+          border: Border.all(
+            color: (widget.tabIndex == 1)
+                ? Colors.grey.shade400
+                : Colors.grey.shade600,
+            width: 1,
           ),
-        ),
-      );
-    } else {
-      // Normal Folders (Tab 0 and 1) -> Clean Container
-      return VisibilityDetector(
-        key: widget.key ?? Key(widget.task.id),
-        onVisibilityChanged: (info) {
-          if (info.visibleFraction > 0.5 &&
-              widget.shouldBlink &&
-              !_hasBlinked) {
-            _startBlinking();
-          }
-        },
-        child: Container(
+        );
+
+        // Update content container to use this new deco
+        mainContainer = Container(
           margin: margin,
-          decoration: decoration,
+          decoration: topLayerDeco,
           child: content,
+        );
+      }
+
+      // 3. Build Stack
+      mainContainer = Container(
+        margin: margin,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            // Bottom Layer
+            Positioned(
+              top: 4,
+              left: 0,
+              right: 0,
+              bottom: -4,
+              child: Container(
+                decoration: backLayerDeco.copyWith(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            // Middle Layer
+            Positioned(
+              top: 2,
+              left: 0,
+              right: 0,
+              bottom: -2,
+              child: Container(
+                decoration: backLayerDeco.copyWith(
+                  // Slightly lighter or same as back
+                  color: (widget.tabIndex == 2)
+                      ? backLayerDeco.color?.withOpacity(0.8)
+                      : backLayerDeco.color,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+            ),
+            // Top Layer (Main Content)
+            Container(decoration: topLayerDeco, child: content),
+          ],
         ),
       );
     }
+
+    return VisibilityDetector(
+      key: widget.key ?? Key(widget.task.id),
+      onVisibilityChanged: (info) {
+        if (info.visibleFraction > 0.5 && widget.shouldBlink && !_hasBlinked) {
+          _startBlinking();
+        }
+      },
+      child: mainContainer,
+    );
   }
 }
