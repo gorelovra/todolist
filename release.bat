@@ -10,6 +10,15 @@ echo      АВТОМАТИЧЕСКАЯ СБОРКА TDL-ROMAN
 echo ==========================================
 echo.
 
+echo [PRE-CHECK] Копирование _vajno.md...
+copy /Y "C:\_my\android\_vajno.md" ".\_vajno.md" >nul
+if %errorlevel% neq 0 (
+    echo [!] КРИТИЧЕСКАЯ ОШИБКА: Не удалось скопировать C:\_my\android\_vajno.md
+    goto error
+)
+echo [OK] Файл _vajno.md скопирован.
+echo.
+
 echo [0/5] Поднятие версии (Patch + Build)...
 (
 echo $path = "pubspec.yaml"
@@ -108,7 +117,6 @@ echo      УСПЕХ! ВЕРСИЯ ПОДНЯТА, ИКОНКИ ПРОВЕРЕН
 echo ==========================================
 
 powershell -c "(New-Object Media.SoundPlayer '%SOUND_SUCCESS%').PlaySync();"
-
 pause
 exit /b 0
 
@@ -117,7 +125,6 @@ echo.
 echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 echo        ПРОИЗОШЛА ОШИБКА
 echo !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-
 powershell -c "(New-Object Media.SoundPlayer '%SOUND_ERROR%').PlaySync();"
 
 pause
