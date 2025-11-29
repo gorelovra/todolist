@@ -35,13 +35,17 @@ class NotificationService {
         );
 
     await _flutterLocalNotificationsPlugin.initialize(initializationSettings);
+  }
 
+  Future<bool?> requestPermissions() async {
     final platform = _flutterLocalNotificationsPlugin
         .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin
         >();
-    await platform?.requestNotificationsPermission();
-    await platform?.requestExactAlarmsPermission();
+    if (platform != null) {
+      return await platform.requestNotificationsPermission();
+    }
+    return null;
   }
 
   Future<void> cancelAll() async {
@@ -52,32 +56,42 @@ class NotificationService {
     await _flutterLocalNotificationsPlugin.cancel(id);
   }
 
-  Future<void> schedulePauseReminder(String taskTitle) async {
+  Future<NotificationAppLaunchDetails?> getLaunchDetails() async {
+    return await _flutterLocalNotificationsPlugin
+        .getNotificationAppLaunchDetails();
+  }
+
+  Future<void> scheduleDelayed(
+    int id,
+    String title,
+    String body,
+    int delaySeconds,
+  ) async {
     try {
       final now = tz.TZDateTime.now(tz.local);
-      final scheduledDate = now.add(const Duration(minutes: 5));
+      final scheduledDate = now.add(Duration(seconds: delaySeconds));
 
       await _flutterLocalNotificationsPlugin.zonedSchedule(
-        1,
-        'Не забывай о главном',
-        taskTitle,
+        id,
+        title,
+        body,
         scheduledDate,
         const NotificationDetails(
           android: AndroidNotificationDetails(
-            'pause_reminder',
-            'Напоминание при выходе',
-            channelDescription: 'Напоминает о задачах через 5 минут',
-            importance: Importance.high,
+            'pause_reminder_simple',
+            'Напоминания',
+            channelDescription: 'Обычные уведомления',
+            importance: Importance.max,
             priority: Priority.high,
           ),
           iOS: DarwinNotificationDetails(),
         ),
-        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
     } catch (e) {
-      debugPrint('Error scheduling pause notification: $e');
+      debugPrint('Error scheduling delayed notification: $e');
     }
   }
 
@@ -106,7 +120,7 @@ class NotificationService {
         scheduledDate,
         const NotificationDetails(
           android: AndroidNotificationDetails(
-            'daily_top_task',
+            'daily_top_task_v3',
             'Главная задача',
             channelDescription: 'Утреннее уведомление о верхней задаче',
             importance: Importance.max,

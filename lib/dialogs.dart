@@ -21,6 +21,8 @@ void showTaskDialog(
   onSaveNew,
   required Function(Task task, int urgency, int importance, int positionMode)
   onUpdate,
+  Function(String id)? onDuplicateFound,
+  Function()? onDuplicateClear,
 }) {
   final titleController = TextEditingController(text: task?.title ?? '');
   int urgency = task?.urgency ?? 1;
@@ -86,18 +88,24 @@ void showTaskDialog(
             if (text.isEmpty) return;
 
             if (!force && task == null) {
-              final duplicate = box.values.any(
+              final duplicate = box.values.cast<Task?>().firstWhere(
                 (t) =>
+                    t != null &&
                     t.title.trim().toLowerCase() == text.toLowerCase() &&
                     !t.isDeleted &&
                     !t.isCompleted &&
                     t.parentId == parentId,
+                orElse: () => null,
               );
 
-              if (duplicate) {
+              if (duplicate != null) {
                 setDialogState(() {
                   isDuplicateWarning = true;
                 });
+
+                // Found *a* duplicate, but main.dart will find ALL and scroll
+                // We return just to trigger the warning state in Dialog
+                // Main logic handles the highlighting of all items via _duplicateIds
                 return;
               }
             }
@@ -117,6 +125,7 @@ void showTaskDialog(
               task.isFolder = isFolder;
               onUpdate(task, urgency, importance, positionMode);
             }
+            onDuplicateClear?.call();
             Navigator.pop(ctx);
           }
 
@@ -166,82 +175,91 @@ void showTaskDialog(
                                 setDialogState(() {
                                   isDuplicateWarning = false;
                                 });
+                                onDuplicateClear?.call();
                               }
                             },
                           ),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 8),
 
+                    // 1.3 Fix: Message is now part of the Column flow, preventing overlap
                     if (isDuplicateWarning)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 8,
-                        ),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.shade50,
-                          border: Border.all(color: Colors.orange.shade200),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.warning_amber_rounded,
-                              color: Colors.orange,
-                              size: 20,
-                            ),
-                            const SizedBox(width: 8),
-                            const Expanded(
-                              child: Text(
-                                "Обнаружен дубликат",
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.deepOrange,
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.red.shade50,
+                            border: Border.all(color: Colors.red.shade200),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.warning_amber_rounded,
+                                color: Colors.red,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              const Expanded(
+                                child: Text(
+                                  "Дубликат! Создать копию?",
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Colors.red,
+                                    fontWeight: FontWeight.bold,
+                                  ),
                                 ),
                               ),
-                            ),
-                            TextButton(
-                              onPressed: () {
-                                setDialogState(() {
-                                  isDuplicateWarning = false;
-                                });
-                              },
-                              style: TextButton.styleFrom(
-                                padding: EdgeInsets.zero,
-                                minimumSize: const Size(50, 30),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                              child: const Text(
-                                "Отмена",
-                                style: TextStyle(
-                                  color: Colors.grey,
-                                  fontSize: 12,
+                              TextButton(
+                                onPressed: () {
+                                  setDialogState(() {
+                                    isDuplicateWarning = false;
+                                  });
+                                  onDuplicateClear?.call();
+                                },
+                                style: TextButton.styleFrom(
+                                  padding: EdgeInsets.zero,
+                                  minimumSize: const Size(50, 30),
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: const Text(
+                                  "Отмена",
+                                  style: TextStyle(
+                                    color: Colors.grey,
+                                    fontSize: 12,
+                                  ),
                                 ),
                               ),
-                            ),
-                            const SizedBox(width: 8),
-                            TextButton(
-                              onPressed: () => checkAndSave(force: true),
-                              style: TextButton.styleFrom(
-                                padding: EdgeInsets.zero,
-                                minimumSize: const Size(50, 30),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                              child: const Text(
-                                "Дублировать",
-                                style: TextStyle(
-                                  color: Colors.red,
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 12,
+                              const SizedBox(width: 8),
+                              TextButton(
+                                onPressed: () => checkAndSave(force: true),
+                                style: TextButton.styleFrom(
+                                  padding: EdgeInsets.zero,
+                                  minimumSize: const Size(50, 30),
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                child: const Text(
+                                  "Да",
+                                  style: TextStyle(
+                                    color: Colors.red,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
                                 ),
                               ),
-                            ),
-                          ],
+                            ],
+                          ),
                         ),
                       ),
+
+                    const SizedBox(height: 8),
 
                     SizedBox(
                       height: 170,
@@ -318,6 +336,7 @@ void showTaskDialog(
                                       size: 50,
                                       onTap: () {
                                         attentionTimer?.cancel();
+                                        onDuplicateClear?.call();
                                         Navigator.pop(ctx);
                                       },
                                     ),

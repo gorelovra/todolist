@@ -251,6 +251,7 @@ class TaskItemWidget extends StatefulWidget {
   final bool shouldBlink;
   final bool isFolderOpen;
   final bool isMenuOpen;
+  final bool isDuplicate;
   final int tabIndex;
   final VoidCallback onBlinkFinished;
   final VoidCallback onToggleExpand;
@@ -270,6 +271,7 @@ class TaskItemWidget extends StatefulWidget {
     this.shouldBlink = false,
     this.isFolderOpen = false,
     this.isMenuOpen = false,
+    this.isDuplicate = false,
     required this.tabIndex,
     required this.onBlinkFinished,
     required this.onToggleExpand,
@@ -341,7 +343,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
     FontWeight fontWeight = FontWeight.normal;
     TextDecoration textDecoration = TextDecoration.none;
 
-    // Logic for text color
     if (widget.tabIndex == 0) {
       textColor = Colors.grey;
       textDecoration = TextDecoration.lineThrough;
@@ -353,8 +354,7 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       if (widget.task.isCompleted) {
         textColor = Colors.grey;
       } else {
-        if (widget.task.urgency == 2)
-          textColor = const Color(0xFF1A237E); // Dark Blue for Urgent
+        if (widget.task.urgency == 2) textColor = const Color(0xFF1A237E);
         if (widget.task.importance == 2) fontWeight = FontWeight.bold;
       }
     }
@@ -379,22 +379,29 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
     }
 
     Color borderColor = Colors.transparent;
+
+    // Priority: Blinking (Highest) > Duplicate (Static)
     if (_isHighlighed) {
+      borderColor = Colors.red;
+    } else if (widget.isDuplicate) {
       borderColor = Colors.red;
     }
 
-    // Apply highlighting border if needed
-    if (!(_isHighlighed == false &&
-        widget.isMenuOpen &&
-        decoration.border != null)) {
-      // FIX FOR FOLDERS BORDER IN LIST:
-      // If it's a folder in Active/Deleted tabs, we might already have a border from below logic,
-      // but Blink takes precedence.
-      // If no Blink, we want to keep the "darker border" we set for folders.
+    // Always add 3px border to prevent Jitter
+    bool hasCustomFolderBorder = widget.task.isFolder && widget.tabIndex != 2;
 
-      if (!_isHighlighed && widget.task.isFolder && widget.tabIndex != 2) {
-        // Keep existing border from folder logic (set below) or do nothing
-      } else {
+    if (_isHighlighed) {
+      // Force red thick border if blinking
+      decoration = decoration.copyWith(
+        border: Border.all(color: Colors.red, width: 3),
+      );
+    } else if (!hasCustomFolderBorder) {
+      decoration = decoration.copyWith(
+        border: Border.all(color: borderColor, width: 3),
+      );
+    } else {
+      // For light folders, override only if necessary (dup)
+      if (borderColor != Colors.transparent) {
         decoration = decoration.copyWith(
           border: Border.all(color: borderColor, width: 3),
         );
@@ -413,19 +420,31 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
     Widget content = InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(8),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 8),
         child: Row(
-          crossAxisAlignment:
-              CrossAxisAlignment.start, // Align to top for multi-line
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.only(right: 12, top: 4),
-              child: widget.indicatorBuilder(widget.task, widget.isSelected),
+            // Left click area (Indicator)
+            GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTap: widget.onToggleSelection,
+              child: Container(
+                width: 50,
+                padding: const EdgeInsets.only(left: 8),
+                alignment: Alignment.centerLeft,
+                color: Colors.transparent, // Hitbox
+                child: widget.indicatorBuilder(widget.task, widget.isSelected),
+              ),
             ),
+
+            // Minimal spacer
+            const SizedBox(width: 8),
+
+            // Center Text
             Expanded(
               child: Padding(
-                padding: const EdgeInsets.only(top: 4, bottom: 4),
+                padding: const EdgeInsets.only(top: 4, bottom: 4, left: 0),
                 child: Text(
                   widget.task.title,
                   maxLines: widget.isExpanded ? null : 2,
@@ -441,29 +460,44 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
                 ),
               ),
             ),
-            if (widget.showCup) ...[
-              const SizedBox(width: 8),
-              const Padding(
-                padding: EdgeInsets.only(top: 2),
-                child: Icon(Icons.emoji_events, color: Colors.white, size: 28),
-              ),
-            ],
-            GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTap: widget.onMenuTap,
-              child: Container(
-                width: 40,
-                height: 40,
-                color: Colors.transparent,
-                alignment: Alignment.topCenter,
-                padding: const EdgeInsets.only(top: 2),
-                child: Icon(
-                  Icons.more_vert,
-                  color: widget.tabIndex == 2
-                      ? Colors.white54
-                      : Colors.grey[400],
-                  size: 24,
-                ),
+
+            // Right click area (Menu/Cup)
+            Container(
+              width: 50,
+              alignment: Alignment.centerRight,
+              padding: const EdgeInsets.only(right: 0),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  if (widget.showCup)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: Icon(
+                        Icons.emoji_events,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                    ),
+
+                  GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: widget.onMenuTap,
+                    child: Container(
+                      width: 30, // Icon hitbox
+                      height: 30,
+                      color: Colors.transparent,
+                      alignment: Alignment.center,
+                      child: Icon(
+                        Icons.more_vert,
+                        color: widget.tabIndex == 2
+                            ? Colors.white54
+                            : Colors.grey[400],
+                        size: 24,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -477,13 +511,10 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
       child: content,
     );
 
-    // --- FOLDER STACK LOGIC ---
     if (widget.task.isFolder) {
-      // 1. Calculate Back Layer Decoration
       BoxDecoration backLayerDeco;
 
       if (widget.tabIndex == 2) {
-        // Triumph (keep golden/dark stack)
         backLayerDeco = decoration.copyWith(
           color: decoration.color?.withOpacity(0.6),
           boxShadow: [],
@@ -495,40 +526,40 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
           );
         }
       } else {
-        // Active (1) or Deleted (0)
-        // Make layers distinct grey
         Color layerColor = (widget.tabIndex == 1)
-            ? Colors
-                  .grey
-                  .shade300 // Layer for Active
-            : Colors.grey.shade400; // Layer for Deleted
+            ? Colors.grey.shade300
+            : Colors.grey.shade400;
 
         backLayerDeco = BoxDecoration(
           color: layerColor,
           borderRadius: BorderRadius.circular(8),
-          // No border for back layers to keep it clean, or thin border
         );
       }
 
-      // 2. Adjust Top Layer Decoration for Visibility in Light Mode
       BoxDecoration topLayerDeco = decoration;
       if (widget.tabIndex != 2) {
-        // Apply custom fill and border for folders in light tabs
-        topLayerDeco = topLayerDeco.copyWith(
-          // Light grey fill to distinguish from white background
-          color: (widget.tabIndex == 1)
-              ? const Color(0xFFF5F5F5)
-              : Colors.grey[300],
-          // Darker border
-          border: Border.all(
+        // Only apply grey border if NOT highlighting (Red)
+        if (borderColor == Colors.transparent) {
+          topLayerDeco = topLayerDeco.copyWith(
             color: (widget.tabIndex == 1)
-                ? Colors.grey.shade400
-                : Colors.grey.shade600,
-            width: 1,
-          ),
-        );
+                ? const Color(0xFFF5F5F5)
+                : Colors.grey[300],
+            border: Border.all(
+              color: (widget.tabIndex == 1)
+                  ? Colors.grey.shade400
+                  : Colors.grey.shade600,
+              width: 1,
+            ),
+          );
+        } else {
+          // Highlight active (Red border already on mainContainer, just bg here)
+          topLayerDeco = topLayerDeco.copyWith(
+            color: (widget.tabIndex == 1)
+                ? const Color(0xFFF5F5F5)
+                : Colors.grey[300],
+          );
+        }
 
-        // Update content container to use this new deco
         mainContainer = Container(
           margin: margin,
           decoration: topLayerDeco,
@@ -536,13 +567,11 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
         );
       }
 
-      // 3. Build Stack
       mainContainer = Container(
         margin: margin,
         child: Stack(
           clipBehavior: Clip.none,
           children: [
-            // Bottom Layer
             Positioned(
               top: 4,
               left: 0,
@@ -554,7 +583,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
                 ),
               ),
             ),
-            // Middle Layer
             Positioned(
               top: 2,
               left: 0,
@@ -562,7 +590,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
               bottom: -2,
               child: Container(
                 decoration: backLayerDeco.copyWith(
-                  // Slightly lighter or same as back
                   color: (widget.tabIndex == 2)
                       ? backLayerDeco.color?.withOpacity(0.8)
                       : backLayerDeco.color,
@@ -570,7 +597,6 @@ class _TaskItemWidgetState extends State<TaskItemWidget> {
                 ),
               ),
             ),
-            // Top Layer (Main Content)
             Container(decoration: topLayerDeco, child: content),
           ],
         ),

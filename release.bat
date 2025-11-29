@@ -9,7 +9,6 @@ echo ==========================================
 echo      АВТОМАТИЧЕСКАЯ СБОРКА TDL-ROMAN
 echo ==========================================
 echo.
-
 echo [PRE-CHECK] Копирование _vajno.md...
 copy /Y "C:\_my\android\_vajno.md" ".\_vajno.md" >nul
 if %errorlevel% neq 0 (
@@ -32,6 +31,8 @@ echo     $newVersion = "version: $majorMinor.$patch+$build"
 echo     $content = $content -replace $pattern, $newVersion
 echo     Set-Content $path $content -NoNewline
 echo     Write-Host "SUCCESS: New version is $majorMinor.$patch+$build" -ForegroundColor Green
+echo     $verFileName = "$majorMinor.$patch-$build"
+echo     $verFileName ^| Out-File "version.tmp" -Encoding ASCII -NoNewline
 echo } else {
 echo     Write-Error "ERROR: Version string format X.Y.Z+B not found in pubspec.yaml"
 echo     exit 1
@@ -45,6 +46,10 @@ if %errorlevel% neq 0 (
     goto error
 )
 del update_version.ps1
+
+set /p FULL_VERSION=<version.tmp
+del version.tmp
+echo [i] Версия для файла: %FULL_VERSION%
 
 echo.
 echo [1/5] Принудительная остановка Java и очистка (flutter clean)...
@@ -104,8 +109,11 @@ if exist "%KEY_STORE%" (
 )
 
 if exist "%APK_FILE%" (
-    copy /Y "%APK_FILE%" "%DEST%\" >nul
-    echo [OK] APK файл успешно скопирован.
+    echo [i] Удаление старых APK в целевой папке...
+    del /Q "%DEST%\*.apk" 2>nul
+    
+    copy /Y "%APK_FILE%" "%DEST%\app-release(%FULL_VERSION%).apk" >nul
+    echo [OK] APK файл успешно сохранен как "app-release(%FULL_VERSION%).apk"
 ) else (
     echo [!] ОШИБКА: APK файл не найден!
     goto error

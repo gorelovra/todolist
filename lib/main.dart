@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 
-// Импорт виджетов и новых сервисов
 import 'widgets.dart';
 import 'dialogs.dart';
 import 'services/notifications.dart';
@@ -28,7 +27,9 @@ void main() async {
     ),
   );
 
-  await NotificationService().initialize();
+  final notifs = NotificationService();
+  await notifs.initialize();
+  await notifs.requestPermissions();
 
   runApp(const TdlRomanApp(home: RomanHomePage()));
 }
@@ -51,13 +52,17 @@ class _RomanHomePageState extends State<RomanHomePage>
   final UpdateService _updateService = UpdateService();
 
   int _currentIndex = 1;
+  bool _isScrolling = false;
 
   String? _expandedTaskId;
   String? _selectedTaskId;
   String? _highlightTaskId;
   String? _menuOpenTaskId;
+  Set<String> _duplicateIds = {};
+  bool _showDuplicateWarning = false;
 
   final Set<String> _openFolders = {};
+  final Set<String> _showCompletedInFolders = {};
   OverlayEntry? _toastEntry;
 
   @override
@@ -69,21 +74,23 @@ class _RomanHomePageState extends State<RomanHomePage>
     _box = Hive.box<Task>('tasksBox');
     _taskRepository = TaskRepository(_box);
 
-    // Лечим "сирот" при старте
     if (_taskRepository.fixOrphans()) {
       setState(() {});
     }
 
     _scheduleDailyNotification();
+    _checkAppLaunch();
 
     _tabController.addListener(() {
-      if (_tabController.indexIsChanging ||
-          _tabController.index != _currentIndex) {
+      if (_tabController.indexIsChanging) {
+      } else if (_tabController.index != _currentIndex) {
         setState(() {
           _currentIndex = _tabController.index;
           _expandedTaskId = null;
           _selectedTaskId = null;
           _menuOpenTaskId = null;
+          _duplicateIds.clear();
+          _showDuplicateWarning = false;
         });
       }
     });
@@ -106,6 +113,31 @@ class _RomanHomePageState extends State<RomanHomePage>
       _schedulePauseNotification();
     } else if (state == AppLifecycleState.resumed) {
       _notificationService.cancel(1);
+      _notificationService.cancel(2);
+    }
+  }
+
+  void _checkAppLaunch() async {
+    final details = await _notificationService.getLaunchDetails();
+    if (details?.didNotificationLaunchApp ?? false) {
+      final activeTasks = _box.values
+          .where((t) => !t.isDeleted && !t.isCompleted && t.parentId == null)
+          .toList();
+
+      if (activeTasks.isNotEmpty) {
+        activeTasks.sort((a, b) {
+          if (a.urgency != b.urgency) return b.urgency.compareTo(a.urgency);
+          return a.sortIndex.compareTo(b.sortIndex);
+        });
+
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (mounted) {
+            setState(() {
+              _highlightTaskId = activeTasks.first.id;
+            });
+          }
+        });
+      }
     }
   }
 
@@ -114,10 +146,27 @@ class _RomanHomePageState extends State<RomanHomePage>
         .where((t) => !t.isDeleted && !t.isCompleted && t.parentId == null)
         .toList();
 
-    if (activeTasks.isEmpty) return;
-    activeTasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+    activeTasks.sort((a, b) {
+      if (a.urgency != b.urgency) return b.urgency.compareTo(a.urgency);
+      return a.sortIndex.compareTo(b.sortIndex);
+    });
 
-    await _notificationService.schedulePauseReminder(activeTasks.first.title);
+    String title = "Zadacha";
+    if (activeTasks.isNotEmpty) {
+      title = activeTasks.first.title;
+      if (title.trim().isEmpty) title = "Zadacha bez nazvaniya";
+    }
+
+    await _notificationService.scheduleDelayed(
+      1,
+      "Test",
+      "Proverka 10 sec",
+      10,
+    );
+
+    if (activeTasks.isNotEmpty) {
+      await _notificationService.scheduleDelayed(2, "Napominanie", title, 20);
+    }
   }
 
   void _scheduleDailyNotification() async {
@@ -129,7 +178,11 @@ class _RomanHomePageState extends State<RomanHomePage>
       await _notificationService.cancel(0);
       return;
     }
-    activeTasks.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
+
+    activeTasks.sort((a, b) {
+      if (a.urgency != b.urgency) return b.urgency.compareTo(a.urgency);
+      return a.sortIndex.compareTo(b.sortIndex);
+    });
 
     await _notificationService.scheduleDailyMorning(activeTasks.first.title);
   }
@@ -205,7 +258,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       return;
     }
 
-    // Используем наш новый парсер
     final roots = ClipboardParser.parse(text);
 
     if (roots.length > 1) {
@@ -213,55 +265,33 @@ class _RomanHomePageState extends State<RomanHomePage>
       return;
     }
     if (roots.isEmpty) {
-      // Парсер вернул пустоту, хотя текст был (редкий кейс)
       return;
     }
 
     final candidate = roots.first;
 
-    // Проверка дубликатов (UI логика, оставляем здесь)
-    final duplicate = _box.values.firstWhere(
-      (t) =>
-          t.title == candidate.title &&
-          !t.isDeleted &&
-          !t.isCompleted &&
-          t.parentId == null,
-      orElse: () => Task(id: '', title: '', createdAt: DateTime.now()),
-    );
+    final duplicates = _box.values
+        .where(
+          (t) =>
+              t.title == candidate.title &&
+              !t.isDeleted &&
+              !t.isCompleted &&
+              t.parentId == null,
+        )
+        .toList();
 
-    if (duplicate.id.isNotEmpty) {
-      _scrollToTask(duplicate);
-      _highlightTaskId = duplicate.id;
-      _triggerBlink();
+    if (duplicates.isNotEmpty) {
+      duplicates.sort((a, b) => a.sortIndex.compareTo(b.sortIndex));
 
-      final bool? shouldCreate = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: Colors.white,
-          title: const Text("Обнаружены дубликаты"),
-          content: const Text(
-            "Такая задача уже есть, я подсветил её.\nВсё равно создать?",
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text("Отмена", style: TextStyle(color: Colors.grey)),
-            ),
-            TextButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text(
-                "Дублировать",
-                style: TextStyle(
-                  color: Colors.red,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            ),
-          ],
-        ),
-      );
+      setState(() {
+        for (var d in duplicates) {
+          _duplicateIds.add(d.id);
+        }
+        _showDuplicateWarning = true;
+      });
 
-      if (shouldCreate != true) return;
+      _scrollToTask(duplicates.first);
+      return;
     }
 
     showSandboxDialog(
@@ -269,9 +299,6 @@ class _RomanHomePageState extends State<RomanHomePage>
       tempRoot: candidate,
       onImport: (root) {
         _taskRepository.importTaskTree(root);
-        // Нам не нужно знать ID для подсветки, если мы импортируем.
-        // Хотя в оригинале мы подсвечивали. Можно доработать репозиторий, чтобы он возвращал ID.
-        // Для простоты пока просто обновляем UI.
         setState(() {});
         _scheduleDailyNotification();
         _showTopToast("Импортировано!");
@@ -285,7 +312,6 @@ class _RomanHomePageState extends State<RomanHomePage>
         setState(() => _openFolders.add(target.parentId!));
       }
     }
-    // Используем UI-специфичный билдер списка для расчета позиции скролла
     final flatList = _buildHierarchicalList(
       (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
       (t) => !t.isDeleted,
@@ -348,29 +374,64 @@ class _RomanHomePageState extends State<RomanHomePage>
   int _countDeletedRoots() =>
       _box.values.where((t) => t.isDeleted && t.parentId == null).length;
 
-  void _toggleExpand(String id) {
+  void _onTaskTap(String id) {
+    if (_isScrolling) return;
+    if (_scrollController.hasClients &&
+        _scrollController.position.isScrollingNotifier.value)
+      return;
+
     HapticFeedback.selectionClick();
-    final task = _box.get(id);
     setState(() {
-      if (task != null && task.parentId == null) _openFolders.clear();
-      _expandedTaskId = (_expandedTaskId == id) ? null : id;
+      _openFolders.clear();
+      if (_expandedTaskId == id) {
+        _expandedTaskId = null;
+      } else {
+        _expandedTaskId = id;
+      }
     });
   }
 
   void _toggleFolder(String folderId) {
+    if (_isScrolling) return;
+    if (_scrollController.hasClients &&
+        _scrollController.position.isScrollingNotifier.value)
+      return;
+
     HapticFeedback.lightImpact();
     setState(() {
       _expandedTaskId = null;
-      if (_openFolders.contains(folderId)) {
-        _openFolders.remove(folderId);
-      } else {
-        _openFolders.clear();
+
+      bool isCurrentlyOpen = _openFolders.contains(folderId);
+      _openFolders.clear();
+
+      if (!isCurrentlyOpen) {
         _openFolders.add(folderId);
       }
     });
   }
 
+  void _toggleCompletedSubtasks(String folderId) {
+    if (_isScrolling) return;
+    if (_scrollController.hasClients &&
+        _scrollController.position.isScrollingNotifier.value)
+      return;
+
+    HapticFeedback.lightImpact();
+    setState(() {
+      if (_showCompletedInFolders.contains(folderId)) {
+        _showCompletedInFolders.remove(folderId);
+      } else {
+        _showCompletedInFolders.add(folderId);
+      }
+    });
+  }
+
   void _toggleSelection(String id) {
+    if (_isScrolling) return;
+    if (_scrollController.hasClients &&
+        _scrollController.position.isScrollingNotifier.value)
+      return;
+
     final task = _box.get(id);
     if (task != null) {
       if (_currentIndex != 1 && task.parentId != null) return;
@@ -381,7 +442,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     });
   }
 
-  // Генерация Markdown списка (UI логика отображения, оставляем здесь)
   String _formatTaskTitle(Task t) {
     String text = t.title;
     if (t.urgency == 2 && t.importance == 2)
@@ -516,11 +576,6 @@ class _RomanHomePageState extends State<RomanHomePage>
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text(
-                "МЕНЮ",
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
-              ),
-              const SizedBox(height: 20),
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                 children: [
@@ -631,7 +686,6 @@ class _RomanHomePageState extends State<RomanHomePage>
     );
   }
 
-  // UI логика построения списка (Flattened Tree) - оставляем в UI слое
   List<Task> _buildHierarchicalList(
     bool Function(Task) filterRoots,
     bool Function(Task) filterChildren,
@@ -643,15 +697,59 @@ class _RomanHomePageState extends State<RomanHomePage>
     for (var task in rootTasks) {
       flatList.add(task);
       if (task.isFolder && _openFolders.contains(task.id)) {
-        final children = _box.values
-            .where((t) => t.parentId == task.id && filterChildren(t))
+        final allChildren = _box.values
+            .where((t) => t.parentId == task.id)
             .toList();
-        children.sort(
+
+        final activeChildren = allChildren
+            .where((t) => filterChildren(t) && !t.isCompleted)
+            .toList();
+        final completedChildren = allChildren
+            .where((t) => t.isCompleted && !t.isDeleted)
+            .toList();
+
+        activeChildren.sort(
           (a, b) => (a.urgency != b.urgency)
               ? b.urgency.compareTo(a.urgency)
               : a.sortIndex.compareTo(b.sortIndex),
         );
-        flatList.addAll(children);
+
+        if (completedChildren.isNotEmpty && _currentIndex == 1) {
+          bool showCompleted = _showCompletedInFolders.contains(task.id);
+
+          flatList.add(
+            Task(
+              id: 'toggle_completed_${task.id}',
+              title: showCompleted ? '' : '',
+              createdAt: DateTime.now(),
+              parentId: task.id,
+              isFolder: false,
+              isCompleted: true,
+            ),
+          );
+
+          if (showCompleted) {
+            completedChildren.sort(
+              (a, b) => a.sortIndex.compareTo(b.sortIndex),
+            );
+            flatList.addAll(completedChildren);
+          }
+        }
+
+        flatList.addAll(activeChildren);
+
+        if (_currentIndex != 1) {
+          final otherChildren = allChildren.where(filterChildren).toList();
+          otherChildren.sort(
+            (a, b) => (a.urgency != b.urgency)
+                ? b.urgency.compareTo(a.urgency)
+                : a.sortIndex.compareTo(b.sortIndex),
+          );
+          flatList.clear();
+          flatList.add(task);
+          flatList.addAll(otherChildren);
+        }
+
         if (_currentIndex == 1) {
           flatList.add(
             Task(
@@ -669,10 +767,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _onReorder(int oldIndex, int newIndex) {
-    // Внимание: Логика Drag&Drop сильно завязана на визуальном списке.
-    // Мы оставляем вычисление "куда упало" в UI, но сохранение делегируем (частично).
-    // Полный вынос этой логики в Repository сложен из-за `placeholder_` и `_openFolders`.
-
     final flatList = _buildHierarchicalList(
       (t) => !t.isDeleted && !t.isCompleted && t.parentId == null,
       (t) => !t.isDeleted,
@@ -680,12 +774,13 @@ class _RomanHomePageState extends State<RomanHomePage>
 
     if (oldIndex < newIndex) newIndex -= 1;
     final Task item = flatList[oldIndex];
-    if (item.id.startsWith('placeholder_')) return;
+    if (item.id.startsWith('placeholder_') ||
+        item.id.startsWith('toggle_completed_'))
+      return;
 
     flatList.removeAt(oldIndex);
     flatList.insert(newIndex, item);
 
-    // Логика определения нового родителя
     if (item.isFolder) {
       item.parentId = null;
     } else {
@@ -695,6 +790,9 @@ class _RomanHomePageState extends State<RomanHomePage>
         final neighborAbove = flatList[newIndex - 1];
         if (neighborAbove.id.startsWith('placeholder_')) {
           item.parentId = null;
+        } else if (neighborAbove.id.startsWith('toggle_completed_')) {
+          String pid = neighborAbove.parentId!;
+          item.parentId = pid;
         } else if (neighborAbove.parentId != null) {
           item.parentId = neighborAbove.parentId;
         } else if (neighborAbove.isFolder &&
@@ -706,11 +804,11 @@ class _RomanHomePageState extends State<RomanHomePage>
       }
     }
 
-    // Логика "заражения" срочностью (бизнес-правило Скрижалей)
     if (item.parentId == null) {
       if (newIndex < flatList.length - 1) {
         final neighborBelow = flatList[newIndex + 1];
         if (!neighborBelow.id.startsWith('placeholder_') &&
+            !neighborBelow.id.startsWith('toggle_completed_') &&
             neighborBelow.parentId == null) {
           if (neighborBelow.urgency == 2 && item.urgency != 2) item.urgency = 2;
         }
@@ -718,22 +816,24 @@ class _RomanHomePageState extends State<RomanHomePage>
       if (newIndex > 0) {
         final neighborAbove = flatList[newIndex - 1];
         if (!neighborAbove.id.startsWith('placeholder_') &&
+            !neighborAbove.id.startsWith('toggle_completed_') &&
             neighborAbove.parentId == null) {
           if (neighborAbove.urgency != 2 && item.urgency == 2) item.urgency = 1;
         }
       }
     } else {
-      // Для подзадач
       if (newIndex < flatList.length - 1) {
         final neighborBelow = flatList[newIndex + 1];
         if (neighborBelow.parentId == item.parentId &&
-            !neighborBelow.id.startsWith('placeholder_')) {
+            !neighborBelow.id.startsWith('placeholder_') &&
+            !neighborBelow.id.startsWith('toggle_completed_')) {
           if (neighborBelow.urgency == 2 && item.urgency != 2) item.urgency = 2;
         }
       }
       if (newIndex > 0) {
         final neighborAbove = flatList[newIndex - 1];
-        if (neighborAbove.parentId == item.parentId) {
+        if (neighborAbove.parentId == item.parentId &&
+            !neighborAbove.id.startsWith('toggle_completed_')) {
           if (neighborAbove.urgency != 2 && item.urgency == 2) item.urgency = 1;
         }
       }
@@ -741,10 +841,11 @@ class _RomanHomePageState extends State<RomanHomePage>
 
     item.save();
 
-    // Пересчет индексов (Data Logic, но работает с локальным flatList)
     Map<String?, int> counters = {};
     for (var t in flatList) {
-      if (t.id.startsWith('placeholder_')) continue;
+      if (t.id.startsWith('placeholder_') ||
+          t.id.startsWith('toggle_completed_'))
+        continue;
       String? pid = t.parentId;
       int currentIndex = counters[pid] ?? 0;
       t.sortIndex = currentIndex;
@@ -769,56 +870,175 @@ class _RomanHomePageState extends State<RomanHomePage>
             : SystemUiOverlayStyle.dark,
       ),
       body: SafeArea(
-        child: Column(
-          children: [
-            Container(
-              height: 60,
-              decoration: BoxDecoration(
-                color: _backgroundColor,
-                border: Border(
-                  bottom: BorderSide(
-                    color: _currentIndex == 2 ? Colors.white12 : Colors.black12,
+        child: GestureDetector(
+          onTap: () {
+            if (_showDuplicateWarning) {
+              setState(() {
+                _showDuplicateWarning = false;
+                _duplicateIds.clear();
+              });
+            }
+          },
+          behavior: HitTestBehavior.translucent,
+          child: Column(
+            children: [
+              Container(
+                height: 60,
+                decoration: BoxDecoration(
+                  color: _backgroundColor,
+                  border: Border(
+                    bottom: BorderSide(
+                      color: _currentIndex == 2
+                          ? Colors.white12
+                          : Colors.black12,
+                    ),
                   ),
                 ),
-              ),
-              child: TabBar(
-                controller: _tabController,
-                indicatorColor: _currentIndex == 2
-                    ? const Color(0xFFFFD700)
-                    : Colors.black,
-                labelColor: _textColor,
-                unselectedLabelColor: _currentIndex == 2
-                    ? Colors.white38
-                    : Colors.black38,
-                onTap: (index) {},
-                tabs: [
-                  _buildTab(Icons.delete_outline, _countDeletedRoots(), 0),
-                  _buildTab(Icons.list_alt, _countActive(), 1),
-                  _buildTab(Icons.emoji_events_outlined, _countCompleted(), 2),
-                ],
-              ),
-            ),
-            Expanded(
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onTap: () {
-                  HapticFeedback.lightImpact();
-                  _showClipboardMenu(_currentIndex);
-                },
-                child: TabBarView(
+                child: TabBar(
                   controller: _tabController,
-                  children: [
-                    _buildDeletedTasksList(),
-                    _buildActiveTasksList(),
-                    _buildCompletedTasksList(),
+                  indicatorColor: _currentIndex == 2
+                      ? const Color(0xFFFFD700)
+                      : Colors.black,
+                  labelColor: _textColor,
+                  unselectedLabelColor: _currentIndex == 2
+                      ? Colors.white38
+                      : Colors.black38,
+                  onTap: (index) {
+                    if (_currentIndex == index) {
+                      HapticFeedback.mediumImpact();
+                      _showClipboardMenu(index);
+                    } else {
+                      _tabController.animateTo(index);
+                    }
+                  },
+                  tabs: [
+                    _buildTab(Icons.delete_outline, _countDeletedRoots(), 0),
+                    _buildTab(Icons.list_alt, _countActive(), 1),
+                    _buildTab(
+                      Icons.emoji_events_outlined,
+                      _countCompleted(),
+                      2,
+                    ),
                   ],
                 ),
               ),
-            ),
-          ],
+              Expanded(
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: (ScrollNotification notification) {
+                    if (notification is ScrollStartNotification) {
+                      _isScrolling = true;
+                    } else if (notification is ScrollEndNotification) {
+                      _isScrolling = false;
+                    }
+                    return false;
+                  },
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.translucent,
+                    onTap: () {
+                      if (_isScrolling) return;
+                      if (_scrollController.hasClients &&
+                          _scrollController
+                              .position
+                              .isScrollingNotifier
+                              .value) {
+                        return;
+                      }
+
+                      if (_showDuplicateWarning) {
+                        setState(() {
+                          _showDuplicateWarning = false;
+                          _duplicateIds.clear();
+                        });
+                      } else {
+                        HapticFeedback.lightImpact();
+                        _showClipboardMenu(_currentIndex);
+                      }
+                    },
+                    child: TabBarView(
+                      controller: _tabController,
+                      children: [
+                        _buildDeletedTasksList(),
+                        _buildActiveTasksList(),
+                        _buildCompletedTasksList(),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              if (_showDuplicateWarning)
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 20,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    border: Border(
+                      top: BorderSide(color: Colors.grey.shade300),
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.05),
+                        offset: const Offset(0, -2),
+                        blurRadius: 10,
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      TextButton(
+                        onPressed: () {
+                          setState(() {
+                            _duplicateIds.clear();
+                            _showDuplicateWarning = false;
+                          });
+                        },
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.grey,
+                        ),
+                        child: const Text("ОТМЕНА"),
+                      ),
+                      Container(
+                        height: 20,
+                        width: 1,
+                        color: Colors.grey.shade300,
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          showSandboxDialog(
+                            context,
+                            tempRoot: ClipboardParser.parse(
+                              _box.get(_duplicateIds.first)!.title,
+                            ).first,
+                            onImport: (root) {
+                              _taskRepository.importTaskTree(root);
+                              setState(() {
+                                _duplicateIds.clear();
+                                _showDuplicateWarning = false;
+                              });
+                              _scheduleDailyNotification();
+                              _showTopToast("Копия создана!");
+                            },
+                          );
+                        },
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.black,
+                          textStyle: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        child: const Text("ДУБЛИРОВАТЬ"),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
-      floatingActionButton: _currentIndex == 1
+      floatingActionButton: (_currentIndex == 1 && !_showDuplicateWarning)
           ? Container(
               height: 60,
               width: 60,
@@ -831,6 +1051,11 @@ class _RomanHomePageState extends State<RomanHomePage>
                 color: Colors.transparent,
                 child: InkWell(
                   onTap: () {
+                    if (_isScrolling) return;
+                    if (_scrollController.hasClients &&
+                        _scrollController.position.isScrollingNotifier.value) {
+                      return;
+                    }
                     String? targetFolderId;
                     if (_openFolders.isNotEmpty)
                       targetFolderId = _openFolders.first;
@@ -848,36 +1073,22 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   Widget _buildTab(IconData icon, int count, int index) {
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () {
-        if (_currentIndex == index) {
-          HapticFeedback.mediumImpact();
-          _showClipboardMenu(index);
-        } else {
-          _tabController.animateTo(index);
-        }
-      },
-      child: Container(
-        color: Colors.transparent,
-        width: double.infinity,
-        height: 60,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(icon, size: 26),
-            if (count > 0) ...[
-              const SizedBox(width: 8),
-              Text(
-                '$count',
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
+    return Container(
+      color: Colors.transparent,
+      width: double.infinity,
+      height: 60,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 26),
+          if (count > 0) ...[
+            const SizedBox(width: 8),
+            Text(
+              '$count',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
           ],
-        ),
+        ],
       ),
     );
   }
@@ -885,9 +1096,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   Color get _backgroundColor =>
       _currentIndex == 2 ? const Color(0xFF121212) : const Color(0xFFFFFFFF);
   Color get _textColor => _currentIndex == 2 ? Colors.white : Colors.black87;
-
-  // ... _buildTaskItem и декорации (View Logic) ...
-  // Этот код почти не меняется, кроме вызовов репозитория в Dismissible
 
   Widget _buildTaskItem(
     Task task,
@@ -910,35 +1118,67 @@ class _RomanHomePageState extends State<RomanHomePage>
         alignment: Alignment.centerLeft,
       );
     }
+
+    if (task.id.startsWith('toggle_completed_')) {
+      return Container(
+        key: ValueKey(task.id),
+        margin: const EdgeInsets.fromLTRB(48, 4, 16, 4),
+        alignment: Alignment.center,
+        child: GestureDetector(
+          onTap: () => _toggleCompletedSubtasks(task.parentId!),
+          child: Container(
+            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 20),
+            decoration: BoxDecoration(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(Icons.more_horiz, color: Colors.grey[400]),
+          ),
+        ),
+      );
+    }
+
     final isExpanded = _expandedTaskId == task.id;
     final isSelected = _selectedTaskId == task.id;
     final shouldBlink = _highlightTaskId == task.id;
     final isFolderOpen = _openFolders.contains(task.id);
     final isMenuOpen = _menuOpenTaskId == task.id;
+    final isDuplicate = _duplicateIds.contains(task.id);
 
-    Widget content = TaskItemWidget(
-      key: ValueKey(task.id),
-      task: task,
-      index: index,
-      isExpanded: isExpanded,
-      isSelected: isSelected,
-      showCup: showCup,
-      shouldBlink: shouldBlink,
-      isFolderOpen: isFolderOpen,
-      isMenuOpen: isMenuOpen,
-      tabIndex: _currentIndex,
-      onBlinkFinished: () {
-        if (_highlightTaskId == task.id) _highlightTaskId = null;
+    Widget content = Listener(
+      onPointerDown: (_) {
+        _scrollController.position.hold(() {});
       },
-      onToggleExpand: () => _toggleExpand(task.id),
-      onToggleSelection: () => _toggleSelection(task.id),
-      onMenuTap: () {
-        HapticFeedback.lightImpact();
-        _showItemContextMenu(task);
-      },
-      onFolderTap: () => _toggleFolder(task.id),
-      decorationBuilder: (t) => _getTaskDecoration(t, _currentIndex),
-      indicatorBuilder: (t, s) => _buildLeftIndicator(t, s, _currentIndex),
+      child: TaskItemWidget(
+        key: ValueKey(task.id),
+        task: task,
+        index: index,
+        isExpanded: isExpanded,
+        isSelected: isSelected,
+        showCup: showCup,
+        shouldBlink: shouldBlink,
+        isFolderOpen: isFolderOpen,
+        isMenuOpen: isMenuOpen,
+        isDuplicate: isDuplicate,
+        tabIndex: _currentIndex,
+        onBlinkFinished: () {
+          if (_highlightTaskId == task.id) _highlightTaskId = null;
+        },
+        onToggleExpand: () => _onTaskTap(task.id),
+        onToggleSelection: () => _toggleSelection(task.id),
+        onMenuTap: () {
+          if (_isScrolling) return;
+          if (_scrollController.hasClients &&
+              _scrollController.position.isScrollingNotifier.value)
+            return;
+
+          HapticFeedback.lightImpact();
+          _showItemContextMenu(task);
+        },
+        onFolderTap: () => _toggleFolder(task.id),
+        decorationBuilder: (t) => _getTaskDecoration(t, _currentIndex),
+        indicatorBuilder: (t, s) => _buildLeftIndicator(t, s, _currentIndex),
+      ),
     );
 
     bool isLockedChild = (_currentIndex != 1) && (task.parentId != null);
@@ -1017,18 +1257,24 @@ class _RomanHomePageState extends State<RomanHomePage>
         if (task.parentId != null && !task.isDeleted) {
           if (task.isCompleted) {
             _taskRepository.uncompleteTask(task);
-            setState(() {});
+            setState(() {
+              _highlightTaskId = task.id;
+            });
             return false;
           } else {
             if (direction == DismissDirection.startToEnd) {
               _taskRepository.completeTask(task);
               _scheduleDailyNotification();
-              setState(() {});
+              setState(() {
+                _highlightTaskId = task.id;
+              });
               return false;
             } else {
               _taskRepository.moveToTrash(task);
               _scheduleDailyNotification();
-              setState(() {});
+              setState(() {
+                _highlightTaskId = task.id;
+              });
               return false;
             }
           }
@@ -1036,10 +1282,19 @@ class _RomanHomePageState extends State<RomanHomePage>
         if (direction == DismissDirection.startToEnd) {
           if (task.isDeleted) {
             _taskRepository.restoreTask(task);
+            setState(() {
+              _highlightTaskId = task.id;
+            });
           } else if (task.isCompleted) {
             _taskRepository.moveToTrash(task);
+            setState(() {
+              _highlightTaskId = task.id;
+            });
           } else {
             _taskRepository.completeTask(task);
+            setState(() {
+              _highlightTaskId = task.id;
+            });
           }
         } else {
           if (task.isDeleted) {
@@ -1072,12 +1327,17 @@ class _RomanHomePageState extends State<RomanHomePage>
             );
           } else if (task.isCompleted) {
             _taskRepository.restoreTask(task);
+            setState(() {
+              _highlightTaskId = task.id;
+            });
           } else {
             _taskRepository.moveToTrash(task);
+            setState(() {
+              _highlightTaskId = task.id;
+            });
           }
         }
         _scheduleDailyNotification();
-        setState(() {});
         return false;
       },
       child: content,
@@ -1182,7 +1442,9 @@ class _RomanHomePageState extends State<RomanHomePage>
         );
         _highlightTaskId = newTask.id;
         _scheduleDailyNotification();
-        setState(() {});
+        setState(() {
+          _duplicateIds.clear();
+        });
       },
       onUpdate: (task, urgency, importance, mode) {
         _taskRepository.updateTask(
@@ -1193,6 +1455,12 @@ class _RomanHomePageState extends State<RomanHomePage>
         );
         _scheduleDailyNotification();
         setState(() {});
+      },
+      onDuplicateFound: (duplicateId) {},
+      onDuplicateClear: () {
+        setState(() {
+          _duplicateIds.clear();
+        });
       },
     );
   }
@@ -1262,73 +1530,65 @@ class _RomanHomePageState extends State<RomanHomePage>
 
   Widget _buildLeftIndicator(Task task, bool isSelected, int tabIndex) {
     if (isSelected)
-      return GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: () => _toggleSelection(task.id),
-        child: Container(
-          width: 30,
-          height: 30,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(4),
-            boxShadow: const [
-              BoxShadow(
-                color: Colors.black12,
-                blurRadius: 2,
-                offset: Offset(0, 1),
-              ),
-            ],
-          ),
-          child: const Icon(Icons.swap_horiz, size: 20, color: Colors.white),
+      return Container(
+        width: 30,
+        height: 30,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: Colors.black,
+          borderRadius: BorderRadius.circular(4),
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black12,
+              blurRadius: 2,
+              offset: Offset(0, 1),
+            ),
+          ],
         ),
+        child: const Icon(Icons.swap_horiz, size: 20, color: Colors.white),
       );
     if (task.isFolder) {
       IconData? folderOverlayIcon;
       if (tabIndex == 0) folderOverlayIcon = Icons.close;
       if (tabIndex == 2) folderOverlayIcon = Icons.check;
-      return GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: () => _toggleSelection(task.id),
-        child: SizedBox(
-          width: 24,
-          height: 24,
-          child: Stack(
-            children: [
-              Container(
+      return SizedBox(
+        width: 24,
+        height: 24,
+        child: Stack(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: Colors.grey.withOpacity(0.5),
+                  width: 2,
+                ),
+                borderRadius: BorderRadius.circular(4),
+              ),
+            ),
+            Positioned(
+              top: 0,
+              left: 0,
+              child: Container(
+                width: 10,
+                height: 6,
                 decoration: BoxDecoration(
-                  border: Border.all(
-                    color: Colors.grey.withOpacity(0.5),
-                    width: 2,
-                  ),
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              ),
-              Positioned(
-                top: 0,
-                left: 0,
-                child: Container(
-                  width: 10,
-                  height: 6,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.withOpacity(0.5),
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(3),
-                      bottomRight: Radius.circular(3),
-                    ),
+                  color: Colors.grey.withOpacity(0.5),
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(3),
+                    bottomRight: Radius.circular(3),
                   ),
                 ),
               ),
-              if (folderOverlayIcon != null)
-                Center(
-                  child: Icon(
-                    folderOverlayIcon,
-                    size: 16,
-                    color: Colors.grey.withOpacity(0.8),
-                  ),
+            ),
+            if (folderOverlayIcon != null)
+              Center(
+                child: Icon(
+                  folderOverlayIcon,
+                  size: 16,
+                  color: Colors.grey.withOpacity(0.8),
                 ),
-            ],
-          ),
+              ),
+          ],
         ),
       );
     } else {
@@ -1365,11 +1625,7 @@ class _RomanHomePageState extends State<RomanHomePage>
             borderRadius: BorderRadius.circular(4),
           ),
         );
-      return GestureDetector(
-        behavior: HitTestBehavior.translucent,
-        onTap: () => _toggleSelection(task.id),
-        child: iconWidget,
-      );
+      return iconWidget;
     }
   }
 }
