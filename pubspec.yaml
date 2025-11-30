@@ -2,7 +2,7 @@ name: todolist
 description: "Minimalist task manager with Stoic philosophy and Roman aesthetics."
 publish_to: 'none'
 
-version: 2.6.106+106
+version: 2.6.108+108
 
 environment:
   sdk: ^3.10.0

@@ -52,7 +52,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   final UpdateService _updateService = UpdateService();
 
   int _currentIndex = 1;
-  bool _isScrolling = false;
 
   String? _expandedTaskId;
   String? _selectedTaskId;
@@ -142,21 +141,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _schedulePauseNotification() async {
-    final activeTasks = _box.values
-        .where((t) => !t.isDeleted && !t.isCompleted && t.parentId == null)
-        .toList();
-
-    activeTasks.sort((a, b) {
-      if (a.urgency != b.urgency) return b.urgency.compareTo(a.urgency);
-      return a.sortIndex.compareTo(b.sortIndex);
-    });
-
-    String title = "Zadacha";
-    if (activeTasks.isNotEmpty) {
-      title = activeTasks.first.title;
-      if (title.trim().isEmpty) title = "Zadacha bez nazvaniya";
-    }
-
     await _notificationService.scheduleDelayed(
       1,
       "Test",
@@ -164,9 +148,12 @@ class _RomanHomePageState extends State<RomanHomePage>
       10,
     );
 
-    if (activeTasks.isNotEmpty) {
-      await _notificationService.scheduleDelayed(2, "Napominanie", title, 20);
-    }
+    await _notificationService.scheduleDelayed(
+      2,
+      "Test 2",
+      "Proverka 20 sec",
+      20,
+    );
   }
 
   void _scheduleDailyNotification() async {
@@ -375,14 +362,15 @@ class _RomanHomePageState extends State<RomanHomePage>
       _box.values.where((t) => t.isDeleted && t.parentId == null).length;
 
   void _onTaskTap(String id) {
-    if (_isScrolling) return;
-    if (_scrollController.hasClients &&
-        _scrollController.position.isScrollingNotifier.value)
-      return;
-
     HapticFeedback.selectionClick();
+    final task = _box.get(id);
+
     setState(() {
       _openFolders.clear();
+      if (task != null && task.parentId != null) {
+        _openFolders.add(task.parentId!);
+      }
+
       if (_expandedTaskId == id) {
         _expandedTaskId = null;
       } else {
@@ -392,11 +380,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _toggleFolder(String folderId) {
-    if (_isScrolling) return;
-    if (_scrollController.hasClients &&
-        _scrollController.position.isScrollingNotifier.value)
-      return;
-
     HapticFeedback.lightImpact();
     setState(() {
       _expandedTaskId = null;
@@ -411,11 +394,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _toggleCompletedSubtasks(String folderId) {
-    if (_isScrolling) return;
-    if (_scrollController.hasClients &&
-        _scrollController.position.isScrollingNotifier.value)
-      return;
-
     HapticFeedback.lightImpact();
     setState(() {
       if (_showCompletedInFolders.contains(folderId)) {
@@ -427,11 +405,6 @@ class _RomanHomePageState extends State<RomanHomePage>
   }
 
   void _toggleSelection(String id) {
-    if (_isScrolling) return;
-    if (_scrollController.hasClients &&
-        _scrollController.position.isScrollingNotifier.value)
-      return;
-
     final task = _box.get(id);
     if (task != null) {
       if (_currentIndex != 1 && task.parentId != null) return;
@@ -923,45 +896,26 @@ class _RomanHomePageState extends State<RomanHomePage>
                 ),
               ),
               Expanded(
-                child: NotificationListener<ScrollNotification>(
-                  onNotification: (ScrollNotification notification) {
-                    if (notification is ScrollStartNotification) {
-                      _isScrolling = true;
-                    } else if (notification is ScrollEndNotification) {
-                      _isScrolling = false;
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onTap: () {
+                    if (_showDuplicateWarning) {
+                      setState(() {
+                        _showDuplicateWarning = false;
+                        _duplicateIds.clear();
+                      });
+                    } else {
+                      HapticFeedback.lightImpact();
+                      _showClipboardMenu(_currentIndex);
                     }
-                    return false;
                   },
-                  child: GestureDetector(
-                    behavior: HitTestBehavior.translucent,
-                    onTap: () {
-                      if (_isScrolling) return;
-                      if (_scrollController.hasClients &&
-                          _scrollController
-                              .position
-                              .isScrollingNotifier
-                              .value) {
-                        return;
-                      }
-
-                      if (_showDuplicateWarning) {
-                        setState(() {
-                          _showDuplicateWarning = false;
-                          _duplicateIds.clear();
-                        });
-                      } else {
-                        HapticFeedback.lightImpact();
-                        _showClipboardMenu(_currentIndex);
-                      }
-                    },
-                    child: TabBarView(
-                      controller: _tabController,
-                      children: [
-                        _buildDeletedTasksList(),
-                        _buildActiveTasksList(),
-                        _buildCompletedTasksList(),
-                      ],
-                    ),
+                  child: TabBarView(
+                    controller: _tabController,
+                    children: [
+                      _buildDeletedTasksList(),
+                      _buildActiveTasksList(),
+                      _buildCompletedTasksList(),
+                    ],
                   ),
                 ),
               ),
@@ -1051,11 +1005,6 @@ class _RomanHomePageState extends State<RomanHomePage>
                 color: Colors.transparent,
                 child: InkWell(
                   onTap: () {
-                    if (_isScrolling) return;
-                    if (_scrollController.hasClients &&
-                        _scrollController.position.isScrollingNotifier.value) {
-                      return;
-                    }
                     String? targetFolderId;
                     if (_openFolders.isNotEmpty)
                       targetFolderId = _openFolders.first;
@@ -1167,11 +1116,6 @@ class _RomanHomePageState extends State<RomanHomePage>
         onToggleExpand: () => _onTaskTap(task.id),
         onToggleSelection: () => _toggleSelection(task.id),
         onMenuTap: () {
-          if (_isScrolling) return;
-          if (_scrollController.hasClients &&
-              _scrollController.position.isScrollingNotifier.value)
-            return;
-
           HapticFeedback.lightImpact();
           _showItemContextMenu(task);
         },

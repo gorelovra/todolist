@@ -78,15 +78,14 @@ class NotificationService {
         scheduledDate,
         const NotificationDetails(
           android: AndroidNotificationDetails(
-            'pause_reminder_simple',
-            'Напоминания',
-            channelDescription: 'Обычные уведомления',
+            'simple_notifications',
+            'Уведомления',
             importance: Importance.max,
             priority: Priority.high,
           ),
           iOS: DarwinNotificationDetails(),
         ),
-        androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+        androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
         uiLocalNotificationDateInterpretation:
             UILocalNotificationDateInterpretation.absoluteTime,
       );
